@@ -1,0 +1,27 @@
+{
+  "name": "traversal",
+  "version": "1.0.0",
+  "description": "Traversal en local / LAN (three.js, pixi.js, booyah)",
+  "scripts": {
+    "start": "vite build && tsx server/server.ts",
+    "build": "vite build",
+    "server": "tsx server/server.ts",
+    "typecheck": "tsc"
+  },
+  "type": "module",
+  "dependencies": {
+    "@ghom/booyah": "^1.3.0",
+    "pixi.js": "^8.22.0",
+    "three": "^0.186.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/three": "^0.186.0",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "private": true
+}

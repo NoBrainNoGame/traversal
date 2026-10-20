@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Traversal</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #15171c; }
+      #app, canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      #hud { touch-action: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="board"></canvas>
+      <canvas id="hud" oncontextmenu="return false"></canvas>
+    </div>
+    <pre id="crash" style="position:absolute;left:12px;bottom:12px;color:#ff8080;font:13px monospace;white-space:pre-wrap;margin:0"></pre>
+    <script>
+      // Show startup errors on screen instead of a blank page
+      const crash = (msg) => (document.getElementById("crash").textContent += msg + "\n")
+      addEventListener("error", (e) => crash(String(e.error ?? e.message) + "\n" + (e.error?.stack ?? "")))
+      addEventListener("unhandledrejection", (e) => crash(String(e.reason) + "\n" + (e.reason?.stack ?? "")))
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

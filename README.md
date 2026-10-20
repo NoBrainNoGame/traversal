@@ -3,6 +3,13 @@
 Version jouable à deux du jeu [Traversal](https://www.traversalgame.com/rules), faite avec three.js (plateau 3D),
 pixi.js (interface) et @ghom/booyah (state machines). Projet perso, non officiel.
 
+## Origine
+
+Le jeu n'est pas de moi : il vient de [traversalgame.com](https://www.traversalgame.com) et de
+[darkfireXXI/board_game](https://github.com/darkfireXXI/board_game). Ce repository est juste un portage en
+TypeScript pour jouer avec mes amis, avec les thèmes visuels que je veux, et qui corrige les miss clicks de la
+version .com.
+
 ## Lancer une partie
 
 ```sh
