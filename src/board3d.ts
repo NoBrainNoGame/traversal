@@ -6,6 +6,10 @@ import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP } from "./s
 const FOG_COLOR = 0x1d232b
 /** Mesh resolution of the board ground, in vertices per square */
 const CELL_DIVISIONS = 16
+/** Squares painted over the ground: finer than the ground mesh so they hug its slopes, and pulled toward the camera in depth */
+const DRAPE_DIVISIONS = 24
+const DRAPE_LIFT = 0.035
+const OVERLAY = { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }
 /** A press is a click only if the pointer moved less than this between down and up (else it's a board drag) */
 const CLICK_TOLERANCE_PX = 6
 const TILT_RANGE = [-0.45, 0.4]
@@ -15,6 +19,15 @@ const VIEW_ELEVATION = Math.atan2(0.69, 0.72)
 /** Where the stat badges sit around a piece's feet, in screen-aligned directions */
 const BADGE_SIDE = 0.25
 const BADGE_FRONT = 0.22
+
+/** One square of a piece's reach: what it costs to walk there, or how an attack there would go */
+export interface ScopeMark {
+  cell: number
+  kind: "move" | "attack"
+  label: string
+  /** An attack that would fail */
+  muted?: boolean
+}
 
 export type Pick = { kind: "piece"; pieceId: number } | { kind: "cell"; cell: number } | { kind: "exit"; cell: number } | { kind: "none" }
 
@@ -42,6 +55,9 @@ export class Board3D extends EventTarget {
   private terrain = new THREE.Group()
   private scenery = new Scenery()
   private highlights = new THREE.Group()
+  private scope = new THREE.Group()
+  /** Ground labels by look; their text is turned every frame to face the viewer */
+  private scopeTextures = new Map<string, THREE.CanvasTexture>()
   private ground: THREE.Mesh | null = null
   private pieces = new Map<number, PieceView>()
   private exitMarkers: THREE.Mesh[] = []
@@ -53,7 +69,7 @@ export class Board3D extends EventTarget {
   )
   private hoverMesh = new THREE.Mesh(
     new THREE.BufferGeometry(),
-    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.35, ...OVERLAY }),
   )
   private pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffe066, depthTest: false }))
   private down: { x: number; y: number; lastX: number; lastY: number; button: number; dragging: boolean } | null = null
@@ -83,7 +99,7 @@ export class Board3D extends EventTarget {
     this.pivot.add(this.pan)
     this.pan.add(this.world)
     this.scene.add(this.pivot)
-    this.world.add(this.terrain, this.scenery.group, this.highlights)
+    this.world.add(this.terrain, this.scenery.group, this.scope, this.highlights)
     this.selection.renderOrder = 10
     this.selection.visible = false
     this.hoverMesh.visible = false
@@ -260,7 +276,7 @@ export class Board3D extends EventTarget {
   /** A highlight laid over the ground of a square, following its slopes */
   private drape(cell: number, size: number, lift: number) {
     const center = this.cellTop(cell)
-    const geo = new THREE.PlaneGeometry(size, size, 8, 8).rotateX(-Math.PI / 2).translate(center.x, 0, center.z)
+    const geo = new THREE.PlaneGeometry(size, size, DRAPE_DIVISIONS, DRAPE_DIVISIONS).rotateX(-Math.PI / 2).translate(center.x, 0, center.z)
     const pos = geo.attributes.position
     for (let i = 0; i < pos.count; i++) pos.setY(i, boardHeight(this.heights, pos.getX(i), pos.getZ(i)) + lift)
     return geo
@@ -329,11 +345,60 @@ export class Board3D extends EventTarget {
       }
       const color = a.kind === "attack" ? 0xff4d4d : a.special ? 0x6ad8ff : 0x5ee07a
       const tile = new THREE.Mesh(
-        this.drape(a.to, 0.8, 0.015),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: a.kind === "attack" ? 0.7 : 0.5, depthWrite: false }),
+        this.drape(a.to, 0.8, DRAPE_LIFT),
+        new THREE.MeshBasicMaterial({ color, opacity: a.kind === "attack" ? 0.7 : 0.5, ...OVERLAY }),
       )
       this.highlights.add(tile)
     }
+  }
+
+  /**
+   * Shows a piece's reach, painted on the ground: a translucent white square (red on enemies, grey for a lost attack)
+   * with the walking cost or the attack modifier written on it. Without `tint`, only the numbers are painted
+   * (the move highlights already colour the squares).
+   */
+  showScope(marks: ScopeMark[], tint = true) {
+    this.scope.clear()
+    for (const mark of marks) {
+      const background = !tint ? null : mark.kind === "move" ? "255,255,255" : mark.muted ? "138,133,128" : "255,77,77"
+      // On an enemy's square the number sits at the front edge, clear of the piece standing in the middle
+      const front = mark.kind === "attack"
+      const tile = new THREE.Mesh(
+        this.drape(mark.cell, 0.84, front ? DRAPE_LIFT + 0.02 : DRAPE_LIFT),
+        new THREE.MeshBasicMaterial({ map: this.scopeTexture(mark.label, background, front), ...OVERLAY }),
+      )
+      this.scope.add(tile)
+    }
+  }
+
+  private scopeTexture(text: string, background: string | null, front: boolean) {
+    const key = `${text}|${background}|${front}`
+    let texture = this.scopeTextures.get(key)
+    if (texture) return texture
+    const size = 128
+    const canvas = document.createElement("canvas")
+    canvas.width = canvas.height = size
+    const ctx = canvas.getContext("2d")!
+    if (background) {
+      ctx.fillStyle = `rgba(${background},0.33)`
+      ctx.fillRect(0, 0, size, size)
+    }
+    ctx.font = `bold ${front ? 40 : 76}px sans-serif`
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+    const y = front ? 106 : 68
+    // Cut the digits out of the background first, so they get exactly their own opacity
+    ctx.globalCompositeOperation = "destination-out"
+    ctx.fillText(text, size / 2, y)
+    ctx.globalCompositeOperation = "source-over"
+    ctx.fillStyle = "rgba(255,255,255,0.66)"
+    ctx.fillText(text, size / 2, y)
+    texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.center.set(0.5, 0.5)
+    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy()
+    this.scopeTextures.set(key, texture)
+    return texture
   }
 
   /** Highlights the hovered square and the path the piece would take */
@@ -341,7 +406,7 @@ export class Board3D extends EventTarget {
     this.hoverMesh.visible = cell !== null
     if (cell !== null) {
       this.hoverMesh.geometry.dispose()
-      this.hoverMesh.geometry = this.drape(cell, 0.96, 0.02)
+      this.hoverMesh.geometry = this.drape(cell, 0.96, DRAPE_LIFT + 0.005)
     }
     this.pathLine.geometry.dispose()
     this.pathLine.geometry = new THREE.BufferGeometry().setFromPoints(path.map((c) => this.cellTop(c, 0.12)))
@@ -405,6 +470,9 @@ export class Board3D extends EventTarget {
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).applyQuaternion(toLocal).setY(0).normalize()
     const front = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion).applyQuaternion(toLocal).setY(0).normalize()
     const seconds = now / 1000
+    // Ground numbers turn in 45° steps so they always read upright from where the board is seen
+    const textAngle = Math.round(Math.atan2(front.x, front.z) / (Math.PI / 4)) * (Math.PI / 4)
+    for (const texture of this.scopeTextures.values()) texture.rotation = textAngle
     for (const [id, view] of this.pieces) {
       view.badges.move.position.copy(right).multiplyScalar(-BADGE_SIDE).addScaledVector(front, BADGE_FRONT).setY(0.08)
       view.badges.strength.position.copy(right).multiplyScalar(BADGE_SIDE).addScaledVector(front, BADGE_FRONT).setY(0.08)

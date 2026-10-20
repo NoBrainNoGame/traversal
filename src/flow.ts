@@ -1,6 +1,6 @@
 import { ChipBase, Composite, Signal, StateMachine } from "@ghom/booyah"
-import { legalActions, PIECES, pieceAt, TERRAIN_MODES, type GameState, type LegalAction, type Seat, type TerrainMode } from "../shared/rules"
-import type { Board3D, Pick } from "./board3d"
+import { legalActions, PIECES, pieceAt, pieceScope, TERRAIN_MODES, type GameState, type LegalAction, type Seat, type TerrainMode } from "../shared/rules"
+import type { Board3D, Pick, ScopeMark } from "./board3d"
 import type { Hud } from "./hud"
 import type { Net } from "./net"
 
@@ -32,9 +32,46 @@ function phaseOf(session: Session): Phase {
 }
 
 const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom"]
+const SCOPE_LEGEND = "Vert : coût de déplacement · Rouge : bonus d'attaque (gris : attaque perdue)"
+
+function hoveredPiece(state: GameState, pick: Pick): number | undefined {
+  if (pick.kind === "piece") return pick.pieceId
+  if (pick.kind === "cell") return pieceAt(state, pick.cell)?.id
+}
+
+/** A piece's reach as tags: walking cost on free squares, attack modifier (height, charge, support) on enemies */
+function scopeMarks(state: GameState, pieceId: number): ScopeMark[] {
+  const strength = PIECES[state.pieces[pieceId].type].strength
+  return pieceScope(state, pieceId).flatMap((la): ScopeMark[] => {
+    if (la.action.kind === "move") return [{ cell: la.action.to, kind: "move", label: String(la.cost) }]
+    if (la.action.kind === "attack" && la.attack) {
+      const mod = la.attack.attack - strength
+      const label = mod > 0 ? `+${mod}` : mod < 0 ? String(mod) : "±0"
+      return [{ cell: la.action.to, kind: "attack", label, muted: la.attack.attack < la.attack.defense }]
+    }
+    return []
+  })
+}
+
+function pieceInfo(state: GameState, pieceId: number) {
+  const piece = state.pieces[pieceId]
+  const def = PIECES[piece.type]
+  return [`${def.name} ${piece.owner === 0 ? "rouge" : "bleu"} — Mouvement ${def.move} · Force ${def.strength}`, def.special, SCOPE_LEGEND]
+}
+
 
 /** Base for the chips below: typed access to the services in the chip context */
 abstract class AppChip extends ChipBase {
+  /** Hovering any piece shows its reach and what it is, whoever's turn it is */
+  protected previewOnHover(turn: string, idleInfo: string[]) {
+    this._subscribe(this.board, "hover", (e: CustomEvent<Pick>) => {
+      const state = this.session.state
+      const id = state ? hoveredPiece(state, e.detail) : undefined
+      this.board.showScope(state && id !== undefined ? scopeMarks(state, id) : [])
+      this.hud.update({ turn, info: state && id !== undefined ? pieceInfo(state, id) : idleInfo })
+    })
+  }
+
   protected get net(): Net {
     return this.chipContext.net
   }
@@ -116,6 +153,7 @@ class Over extends PhaseChip {
   protected enter() {
     this.board.showActions(null, [])
     this.board.showHover(null)
+    this.board.showScope([])
     this.refresh()
   }
 
@@ -154,7 +192,10 @@ class Waiting extends AppChip {
   protected _onActivate() {
     this.board.showActions(null, [])
     this.board.showHover(null)
-    this.hud.update({ turn: this.session.seat === null ? "Spectateur" : "Tour de l'adversaire", info: CONTROLS })
+    this.board.showScope([])
+    const turn = this.session.seat === null ? "Spectateur" : "Tour de l'adversaire"
+    this.hud.update({ turn, info: CONTROLS })
+    this.previewOnHover(turn, CONTROLS)
     this._subscribe(this.session, "change", () => this.check())
     this.check()
   }
@@ -169,7 +210,10 @@ class Idle extends AppChip {
   protected _onActivate() {
     this.board.showActions(null, [])
     this.board.showHover(null)
-    this.hud.update({ turn: "À toi de jouer", info: ["Clique sur une de tes pièces.", ...CONTROLS] })
+    this.board.showScope([])
+    const info = ["Clique sur une de tes pièces.", ...CONTROLS]
+    this.hud.update({ turn: "À toi de jouer", info })
+    this.previewOnHover("À toi de jouer", info)
     this._subscribe(this.board, "pick", (e: CustomEvent<Pick>) => {
       const pieceId = ownPiece(this.session, e.detail)
       if (pieceId !== null) this.terminate(new Signal("selected", { pieceId }))
@@ -220,6 +264,8 @@ class Selected extends AppChip {
     const state = this.session.state!
     this.actions = legalActions(state, this.pieceId)
     this.board.showActions(state.pieces[this.pieceId].cell, this.actions)
+    // The move highlights already tint the squares, the tags add costs and attack odds
+    this.board.showScope(scopeMarks(state, this.pieceId), false)
     this.showInfo()
   }
 
@@ -231,7 +277,7 @@ class Selected extends AppChip {
     if (preview?.attack) lines.push(`Attaque ${preview.attack.attack} contre défense ${preview.attack.defense} → capture`)
     else if (preview?.action.kind === "exit") lines.push(`Sortie du plateau : +${def.strength} point${def.strength > 1 ? "s" : ""}`)
     else if (preview) lines.push(`Coût : ${preview.cost} / ${def.move}`)
-    lines.push("Échap ou clic dans le vide : désélectionner")
+    lines.push(SCOPE_LEGEND, "Échap ou clic dans le vide : désélectionner")
     this.hud.update({ turn: "À toi de jouer", info: lines })
   }
 
@@ -262,6 +308,7 @@ class Sending extends AppChip {
   protected _onActivate() {
     const ply = this._inputSignal!.params.ply
     this.board.showHover(null)
+    this.board.showScope([])
     this._subscribe(this.session, "change", () => {
       if (this.state === "active" && this.session.state && this.session.state.ply !== ply)
         this.terminate(new Signal(this.session.myTurn ? "idle" : "waiting"))

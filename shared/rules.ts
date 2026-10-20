@@ -252,7 +252,21 @@ function attackStrength(state: GameState, attacker: Piece, target: Piece, vangua
 export function legalActions(state: GameState, pieceId: number): LegalAction[] {
   const piece = state.pieces[pieceId]
   if (!piece || piece.status !== "board" || piece.owner !== state.turn || state.over) return []
+  return pieceActions(state, piece, false)
+}
 
+/**
+ * What a piece could do if it were its turn: every square it can reach, and every enemy in range,
+ * including the ones too strong to capture (their `attack` tells the odds)
+ */
+export function pieceScope(state: GameState, pieceId: number): LegalAction[] {
+  const piece = state.pieces[pieceId]
+  if (!piece || piece.status !== "board") return []
+  return pieceActions(state, piece, true)
+}
+
+function pieceActions(state: GameState, piece: Piece, withLostAttacks: boolean): LegalAction[] {
+  const pieceId = piece.id
   const h = state.heights
   const budget = PIECES[piece.type].move
   const start = piece.cell
@@ -309,7 +323,7 @@ export function legalActions(state: GameState, pieceId: number): LegalAction[] {
     }
     if (best > budget) continue
     const strength = attackStrength(state, piece, enemy, piece.type === "vanguard" && best === 4)
-    if (strength.attack < strength.defense) continue
+    if (strength.attack < strength.defense && !withLostAttacks) continue
     push({
       action: { kind: "attack", pieceId, to: enemy.cell, special: false },
       path: [...pathTo(from), enemy.cell],
@@ -337,7 +351,7 @@ export function legalActions(state: GameState, pieceId: number): LegalAction[] {
         push({ action: { kind: "move", pieceId, to: c, special: true }, path: [start, c], cost: budget })
       } else if (other.owner !== piece.owner) {
         const strength = attackStrength(state, piece, other, false)
-        if (strength.attack < strength.defense) continue
+        if (strength.attack < strength.defense && !withLostAttacks) continue
         push({ action: { kind: "attack", pieceId, to: c, special: true }, path: [start, c], cost: budget, attack: strength })
       }
     }
