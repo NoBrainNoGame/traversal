@@ -1,7 +1,7 @@
 import * as THREE from "three"
-import { ConvexGeometry } from "three/examples/jsm/geometries/ConvexGeometry.js"
-import { cellAt, cellX, cellY, goalRow, inBoard, N, type GameState, type LegalAction, type PieceType, type Seat } from "../shared/rules"
-import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP, TEAM_COLORS } from "./scenery"
+import { cellAt, cellX, cellY, goalRow, inBoard, N, type GameState, type LegalAction, type Seat } from "../shared/rules"
+import { makePiece, setPieceOpacity, type PieceView } from "./characters"
+import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP } from "./scenery"
 
 const FOG_COLOR = 0x1d232b
 /** Mesh resolution of the board ground, in vertices per square */
@@ -12,24 +12,11 @@ const TILT_RANGE = [-0.45, 0.4]
 const ZOOM_RANGE = [9, 30]
 /** Angle at which the camera looks down at the untilted board */
 const VIEW_ELEVATION = Math.atan2(0.69, 0.72)
+/** Where the stat badges sit around a piece's feet, in screen-aligned directions */
+const BADGE_SIDE = 0.25
+const BADGE_FRONT = 0.22
 
 export type Pick = { kind: "piece"; pieceId: number } | { kind: "cell"; cell: number } | { kind: "exit"; cell: number } | { kind: "none" }
-
-function pieceGeometry(type: PieceType): THREE.BufferGeometry {
-  if (type === "explorer") return new THREE.CylinderGeometry(0, 0.34, 0.62, 5).translate(0, 0.31, 0)
-  if (type === "sentinel") return new THREE.CylinderGeometry(0.3, 0.3, 0.56, 3).translate(0, 0.28, 0)
-  // Vanguard: a diamond base rising to a two-point ridge
-  const r = 0.34,
-    h = 0.5
-  return new ConvexGeometry([
-    new THREE.Vector3(r, 0, 0),
-    new THREE.Vector3(0, 0, r),
-    new THREE.Vector3(-r, 0, 0),
-    new THREE.Vector3(0, 0, -r),
-    new THREE.Vector3(r * 0.45, h, 0),
-    new THREE.Vector3(-r * 0.45, h, 0),
-  ])
-}
 
 interface PieceAnim {
   points: THREE.Vector3[]
@@ -56,7 +43,7 @@ export class Board3D extends EventTarget {
   private scenery = new Scenery()
   private highlights = new THREE.Group()
   private ground: THREE.Mesh | null = null
-  private pieceMeshes = new Map<number, THREE.Mesh>()
+  private pieces = new Map<number, PieceView>()
   private exitMarkers: THREE.Mesh[] = []
   private anims = new Map<number, PieceAnim>()
   private heights: number[] = []
@@ -283,26 +270,22 @@ export class Board3D extends EventTarget {
   setState(state: GameState, animate: boolean) {
     if (state.heights.join() !== this.heights.join()) {
       this.buildTerrain(state.heights)
-      for (const mesh of this.pieceMeshes.values()) this.world.remove(mesh)
-      this.pieceMeshes.clear()
+      for (const view of this.pieces.values()) this.world.remove(view.holder)
+      this.pieces.clear()
       this.anims.clear()
       animate = false
     }
 
     for (const piece of state.pieces) {
-      let mesh = this.pieceMeshes.get(piece.id)
-      if (!mesh) {
+      let view = this.pieces.get(piece.id)
+      if (!view) {
         if (piece.status !== "board") continue
-        mesh = new THREE.Mesh(
-          pieceGeometry(piece.type),
-          new THREE.MeshStandardMaterial({ color: TEAM_COLORS[piece.owner], metalness: 0.3, roughness: 0.45, transparent: true }),
-        )
-        mesh.castShadow = true
-        mesh.userData.pieceId = piece.id
-        mesh.position.copy(this.cellTop(piece.cell))
-        this.world.add(mesh)
-        this.pieceMeshes.set(piece.id, mesh)
+        view = makePiece(piece.type, piece.owner, piece.id)
+        view.holder.position.copy(this.cellTop(piece.cell))
+        this.world.add(view.holder)
+        this.pieces.set(piece.id, view)
       }
+      const mesh = view.holder
       const last = state.last
       if (animate && last && last.action.pieceId === piece.id) {
         const points = last.path.map((c) => this.cellTop(c))
@@ -318,7 +301,7 @@ export class Board3D extends EventTarget {
         mesh.position.copy(this.cellTop(piece.cell))
       } else if (!this.anims.has(piece.id)) {
         this.world.remove(mesh)
-        this.pieceMeshes.delete(piece.id)
+        this.pieces.delete(piece.id)
       }
     }
   }
@@ -368,10 +351,14 @@ export class Board3D extends EventTarget {
     const rect = this.canvas.getBoundingClientRect()
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
     this.raycaster.setFromCamera(ndc, this.camera)
-    const targets = [...this.exitMarkers, ...this.pieceMeshes.values(), ...(this.ground ? [this.ground] : [])]
-    const hit = this.raycaster.intersectObjects(targets, false)[0]
+    const holders = [...this.pieces.values()].map((view) => view.holder)
+    const targets = [...this.exitMarkers, ...holders, ...(this.ground ? [this.ground] : [])]
+    const hit = this.raycaster.intersectObjects(targets, true)[0]
     if (!hit) return { kind: "none" }
-    const data = hit.object.userData
+    // A piece is a group of parts: climb up to the part that carries the id
+    let owner: THREE.Object3D | null = hit.object
+    while (owner.parent && owner.userData.pieceId === undefined) owner = owner.parent
+    const data = owner.userData.pieceId !== undefined ? owner.userData : hit.object.userData
     if (data.exitCell !== undefined) return { kind: "exit", cell: data.exitCell }
     if (data.pieceId !== undefined) return { kind: "piece", pieceId: data.pieceId }
     if (data.board) {
@@ -389,7 +376,8 @@ export class Board3D extends EventTarget {
     this.lastTime = now
 
     for (const [id, anim] of this.anims) {
-      const mesh = this.pieceMeshes.get(id)!
+      const view = this.pieces.get(id)!
+      const mesh = view.holder
       const segments = anim.points.length - 1
       anim.t = Math.min(anim.t + dt * 5, segments)
       const i = Math.min(Math.floor(anim.t), segments - 1)
@@ -399,15 +387,28 @@ export class Board3D extends EventTarget {
       mesh.position.lerpVectors(a, b, f)
       // Hop over each square, higher when climbing or dropping
       mesh.position.y += Math.sin(f * Math.PI) * (0.25 + Math.abs(b.y - a.y) * 0.6)
-      const material = mesh.material as THREE.MeshStandardMaterial
-      if (anim.fadeOut) material.opacity = 1 - anim.t / segments
+      // Face the way it walks
+      if (Math.abs(b.x - a.x) + Math.abs(b.z - a.z) > 0.01) view.model.rotation.y = Math.atan2(b.x - a.x, b.z - a.z)
+      if (anim.fadeOut) setPieceOpacity(view, 1 - anim.t / segments)
       if (anim.t >= segments) {
         this.anims.delete(id)
         if (anim.fadeOut) {
           this.world.remove(mesh)
-          this.pieceMeshes.delete(id)
+          this.pieces.delete(id)
         }
       }
+    }
+
+    // Badges stay at the screen-left (movement) and screen-right (strength) of each piece's feet, whatever the board's rotation
+    this.world.updateMatrixWorld()
+    const toLocal = this.world.getWorldQuaternion(new THREE.Quaternion()).invert()
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).applyQuaternion(toLocal).setY(0).normalize()
+    const front = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion).applyQuaternion(toLocal).setY(0).normalize()
+    const seconds = now / 1000
+    for (const [id, view] of this.pieces) {
+      view.badges.move.position.copy(right).multiplyScalar(-BADGE_SIDE).addScaledVector(front, BADGE_FRONT).setY(0.08)
+      view.badges.strength.position.copy(right).multiplyScalar(BADGE_SIDE).addScaledVector(front, BADGE_FRONT).setY(0.08)
+      view.model.userData.animate?.(seconds + id)
     }
 
     this.selection.material.opacity = 0.7 + Math.sin(now / 200) * 0.25
