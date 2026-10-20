@@ -25,8 +25,8 @@ Le premier connecté joue Rouge, le second Bleu, les suivants regardent. Recharg
 ## Commandes
 
 - Clic gauche : sélectionner une pièce / jouer un coup (vert = déplacement, cyan = saut d'Explorateur, rouge = attaque, flèche dorée = sortie)
-- Clic gauche glissé : tourner et incliner le plateau (la caméra et la lumière restent fixes)
-- Clic droit glissé : déplacer le plateau · Molette : zoom · Échap : désélectionner
+- Clic gauche glissé : déplacer le plateau · Molette : zoom · Échap : désélectionner
+- Clic droit glissé : tourner et incliner le plateau (la caméra et la lumière restent fixes)
 
 Un glissé n'est jamais pris pour un clic (tolérance de 6 px), et cliquer sur une autre de tes pièces change juste la sélection.
 

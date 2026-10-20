@@ -31,7 +31,7 @@ function phaseOf(session: Session): Phase {
   return session.state.over ? "over" : "playing"
 }
 
-const CONTROLS = ["Clic gauche glissé : tourner · Clic droit : déplacer · Molette : zoom"]
+const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom"]
 
 /** Base for the chips below: typed access to the services in the chip context */
 abstract class AppChip extends ChipBase {

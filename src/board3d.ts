@@ -1,18 +1,19 @@
 import * as THREE from "three"
 import { ConvexGeometry } from "three/examples/jsm/geometries/ConvexGeometry.js"
-import { cellX, cellY, goalRow, N, type GameState, type LegalAction, type PieceType, type Seat } from "../shared/rules"
+import { cellAt, cellX, cellY, goalRow, inBoard, N, type GameState, type LegalAction, type PieceType, type Seat } from "../shared/rules"
+import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP, TEAM_COLORS } from "./scenery"
 
-const STEP = 0.35 // world height of one terrain unit
-const BASE = 0.4
-const TEAM_COLORS = [0xd8443a, 0x3a7bd8]
+const FOG_COLOR = 0x1d232b
+/** Mesh resolution of the board ground, in vertices per square */
+const CELL_DIVISIONS = 16
 /** A press is a click only if the pointer moved less than this between down and up (else it's a board drag) */
 const CLICK_TOLERANCE_PX = 6
 const TILT_RANGE = [-0.45, 0.4]
 const ZOOM_RANGE = [9, 30]
+/** Angle at which the camera looks down at the untilted board */
+const VIEW_ELEVATION = Math.atan2(0.69, 0.72)
 
 export type Pick = { kind: "piece"; pieceId: number } | { kind: "cell"; cell: number } | { kind: "exit"; cell: number } | { kind: "none" }
-
-const HEIGHT_COLORS = [0x2f6f8f, 0x4f9a6a, 0x7fb45a, 0xb7b25b, 0xa47c4a, 0x8a6a55, 0x8f8f94, 0xc4c4cc, 0xf1f1f5]
 
 function pieceGeometry(type: PieceType): THREE.BufferGeometry {
   if (type === "explorer") return new THREE.CylinderGeometry(0, 0.34, 0.62, 5).translate(0, 0.31, 0)
@@ -39,8 +40,12 @@ interface PieceAnim {
 export class Board3D extends EventTarget {
   readonly renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
-  /** The camera and the lights never move: dragging tilts `pivot` and spins `world` (the board and its pieces) */
+  /**
+   * The camera and the lights never move: dragging tilts `pivot`, slides `pan` within the tilted board plane
+   * and spins `world` (the board and its pieces)
+   */
   private pivot = new THREE.Group()
+  private pan = new THREE.Group()
   private world = new THREE.Group()
   private yaw = 0
   private tilt = 0
@@ -48,8 +53,9 @@ export class Board3D extends EventTarget {
   private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
   private raycaster = new THREE.Raycaster()
   private terrain = new THREE.Group()
+  private scenery = new Scenery()
   private highlights = new THREE.Group()
-  private cellMeshes: THREE.Mesh[] = []
+  private ground: THREE.Mesh | null = null
   private pieceMeshes = new Map<number, THREE.Mesh>()
   private exitMarkers: THREE.Mesh[] = []
   private anims = new Map<number, PieceAnim>()
@@ -59,7 +65,7 @@ export class Board3D extends EventTarget {
     new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.95, depthTest: false }),
   )
   private hoverMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.96, 0.96).rotateX(-Math.PI / 2),
+    new THREE.BufferGeometry(),
     new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }),
   )
   private pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffe066, depthTest: false }))
@@ -76,19 +82,21 @@ export class Board3D extends EventTarget {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
-    this.scene.background = new THREE.Color(0x15171c)
+    this.scene.background = new THREE.Color(FOG_COLOR)
+    this.scene.fog = new THREE.Fog(FOG_COLOR, 20, 40)
 
     this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3020, 1.6))
     const sun = new THREE.DirectionalLight(0xffffff, 2.2)
     sun.position.set(-5, 12, 8)
     sun.castShadow = true
     sun.shadow.mapSize.set(2048, 2048)
-    Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8 })
+    Object.assign(sun.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11 })
     this.scene.add(sun)
 
-    this.pivot.add(this.world)
+    this.pivot.add(this.pan)
+    this.pan.add(this.world)
     this.scene.add(this.pivot)
-    this.world.add(this.terrain, this.highlights)
+    this.world.add(this.terrain, this.scenery.group, this.highlights)
     this.selection.renderOrder = 10
     this.selection.visible = false
     this.hoverMesh.visible = false
@@ -140,15 +148,18 @@ export class Board3D extends EventTarget {
     )
   }
 
-  /** Left drag spins and tilts the board, right drag slides it */
+  /** Right drag spins and tilts the board, left drag slides it */
   private drag(button: number, dx: number, dy: number) {
-    if (button === 0) {
+    if (button === 2) {
       this.yaw += dx * 0.008
       this.tilt = THREE.MathUtils.clamp(this.tilt + dy * 0.004, TILT_RANGE[0], TILT_RANGE[1])
-    } else if (button === 2) {
+    } else if (button === 0) {
       const scale = this.distance / 900
-      this.pivot.position.x += dx * scale
-      this.pivot.position.y -= dy * scale
+      // Slide within the board plane so the camera keeps its height above the ground (the wheel handles that).
+      // The ground is seen at a slant, so depth moves are stretched to follow the pointer
+      const slant = Math.sin(VIEW_ELEVATION + this.tilt)
+      this.pan.position.x += dx * scale
+      this.pan.position.z += (dy * scale) / slant
     }
     this.updateView()
   }
@@ -158,6 +169,10 @@ export class Board3D extends EventTarget {
     this.pivot.rotation.x = this.tilt
     this.camera.position.set(0, this.distance * 0.69, this.distance * 0.72)
     this.camera.lookAt(0, 0.5, 0)
+    // The haze starts just past the board, whatever the zoom
+    const fog = this.scene.fog as THREE.Fog
+    fog.near = this.distance - 2
+    fog.far = this.distance + 14
   }
 
   /** Turns the board so the given player's starting row faces the camera */
@@ -166,7 +181,7 @@ export class Board3D extends EventTarget {
     this.seatView = seat
     this.yaw = seat === 0 ? Math.PI : 0
     this.tilt = 0
-    this.pivot.position.set(0, 0, 0)
+    this.pan.position.set(0, 0, 0)
     this.updateView()
   }
 
@@ -180,34 +195,88 @@ export class Board3D extends EventTarget {
     return new THREE.Vector3(cellX(cell) - N / 2 + 0.5, BASE + this.heights[cell] * STEP + lift, cellY(cell) - N / 2 + 0.5)
   }
 
+  /** One continuous ground for the whole board: flat square tops joined by slopes, with a faint line between squares */
   private buildTerrain(heights: number[]) {
     this.heights = heights
     this.terrain.clear()
-    this.cellMeshes = []
-    const edges = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 })
-    for (let c = 0; c < N * N; c++) {
-      const h = BASE + heights[c] * STEP
-      const geo = new THREE.BoxGeometry(1, h, 1)
-      const color = new THREE.Color(HEIGHT_COLORS[Math.min(heights[c], HEIGHT_COLORS.length - 1)])
+    const colors = Array.from({ length: N * N }, (_, c) => {
+      const color = heightColor(heights[c])
       if ((cellX(c) + cellY(c)) % 2) color.offsetHSL(0, 0, -0.03)
-      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.9 }))
-      const top = this.cellTop(c)
-      mesh.position.set(top.x, h / 2, top.z)
-      mesh.castShadow = mesh.receiveShadow = true
-      mesh.userData.cell = c
-      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), edges))
-      this.terrain.add(mesh)
-      this.cellMeshes.push(mesh)
+      return color
+    })
+    const segments = N * CELL_DIVISIONS
+    const geo = new THREE.PlaneGeometry(N, N, segments, segments).rotateX(-Math.PI / 2)
+    const pos = geo.attributes.position
+    const vertexColors = new Float32Array(pos.count * 3)
+    const color = new THREE.Color()
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i),
+        z = pos.getZ(i)
+      color.setRGB(0, 0, 0)
+      let y = 0
+      for (const { cell, w } of boardWeights(x, z)) {
+        y += (BASE + heights[cell] * STEP) * w
+        color.r += colors[cell].r * w
+        color.g += colors[cell].g * w
+        color.b += colors[cell].b * w
+      }
+      pos.setY(i, y)
+      const u = x + N / 2,
+        v = z + N / 2
+      const toEdge = Math.min(Math.abs(u - Math.round(u)), Math.abs(v - Math.round(v)))
+      color.multiplyScalar(1 - 0.16 * (1 - THREE.MathUtils.smoothstep(toEdge, 0, 0.06)))
+      color.toArray(vertexColors, i * 3)
     }
-    // Goal strips: each player exits past the far edge, drawn in their colour
-    for (const seat of [0, 1] as Seat[]) {
-      const strip = new THREE.Mesh(
-        new THREE.BoxGeometry(N, 0.08, 0.35),
-        new THREE.MeshStandardMaterial({ color: TEAM_COLORS[seat], emissive: TEAM_COLORS[seat], emissiveIntensity: 0.25 }),
-      )
-      strip.position.set(0, 0.04, (seat === 0 ? 1 : -1) * (N / 2 + 0.35))
-      this.terrain.add(strip)
+    geo.setAttribute("color", new THREE.BufferAttribute(vertexColors, 3))
+    geo.computeVertexNormals()
+    const material = this.scenery.boardMaterial()
+    this.ground = new THREE.Mesh(geo, material)
+    this.ground.castShadow = this.ground.receiveShadow = true
+    this.ground.userData.board = true
+    this.terrain.add(this.ground, this.buildSkirt(heights))
+    this.scenery.build(heights)
+  }
+
+  /** Earth wall around the board's rim, so no crack shows where it meets the landscape */
+  private buildSkirt(heights: number[]) {
+    const positions: number[] = []
+    const half = N / 2
+    const corners = [
+      [-half, -half],
+      [half, -half],
+      [half, half],
+      [-half, half],
+      [-half, -half],
+    ]
+    for (let k = 0; k < 4; k++) {
+      const [x0, z0] = corners[k],
+        [x1, z1] = corners[k + 1]
+      const steps = N * CELL_DIVISIONS
+      for (let s = 0; s < steps; s++) {
+        const a = s / steps,
+          b = (s + 1) / steps
+        const xa = x0 + (x1 - x0) * a,
+          za = z0 + (z1 - z0) * a
+        const xb = x0 + (x1 - x0) * b,
+          zb = z0 + (z1 - z0) * b
+        const ya = boardHeight(heights, xa, za),
+          yb = boardHeight(heights, xb, zb)
+        positions.push(xa, ya, za, xa, 0, za, xb, yb, zb, xb, yb, zb, xa, 0, za, xb, 0, zb)
+      }
     }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+    geo.computeVertexNormals()
+    return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x4a3c30, roughness: 1, side: THREE.DoubleSide }))
+  }
+
+  /** A highlight laid over the ground of a square, following its slopes */
+  private drape(cell: number, size: number, lift: number) {
+    const center = this.cellTop(cell)
+    const geo = new THREE.PlaneGeometry(size, size, 8, 8).rotateX(-Math.PI / 2).translate(center.x, 0, center.z)
+    const pos = geo.attributes.position
+    for (let i = 0; i < pos.count; i++) pos.setY(i, boardHeight(this.heights, pos.getX(i), pos.getZ(i)) + lift)
+    return geo
   }
 
   /** Syncs the scene with a new game state; animates the last action if it's new */
@@ -277,10 +346,9 @@ export class Board3D extends EventTarget {
       }
       const color = a.kind === "attack" ? 0xff4d4d : a.special ? 0x6ad8ff : 0x5ee07a
       const tile = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.8, 0.8).rotateX(-Math.PI / 2),
+        this.drape(a.to, 0.8, 0.015),
         new THREE.MeshBasicMaterial({ color, transparent: true, opacity: a.kind === "attack" ? 0.7 : 0.5, depthWrite: false }),
       )
-      tile.position.copy(this.cellTop(a.to, 0.015))
       this.highlights.add(tile)
     }
   }
@@ -288,7 +356,10 @@ export class Board3D extends EventTarget {
   /** Highlights the hovered square and the path the piece would take */
   showHover(cell: number | null, path: number[] = []) {
     this.hoverMesh.visible = cell !== null
-    if (cell !== null) this.hoverMesh.position.copy(this.cellTop(cell, 0.02))
+    if (cell !== null) {
+      this.hoverMesh.geometry.dispose()
+      this.hoverMesh.geometry = this.drape(cell, 0.96, 0.02)
+    }
     this.pathLine.geometry.dispose()
     this.pathLine.geometry = new THREE.BufferGeometry().setFromPoints(path.map((c) => this.cellTop(c, 0.12)))
   }
@@ -297,13 +368,18 @@ export class Board3D extends EventTarget {
     const rect = this.canvas.getBoundingClientRect()
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
     this.raycaster.setFromCamera(ndc, this.camera)
-    const targets = [...this.exitMarkers, ...this.pieceMeshes.values(), ...this.cellMeshes]
+    const targets = [...this.exitMarkers, ...this.pieceMeshes.values(), ...(this.ground ? [this.ground] : [])]
     const hit = this.raycaster.intersectObjects(targets, false)[0]
     if (!hit) return { kind: "none" }
     const data = hit.object.userData
     if (data.exitCell !== undefined) return { kind: "exit", cell: data.exitCell }
     if (data.pieceId !== undefined) return { kind: "piece", pieceId: data.pieceId }
-    if (data.cell !== undefined) return { kind: "cell", cell: data.cell }
+    if (data.board) {
+      const local = this.world.worldToLocal(hit.point.clone())
+      const x = Math.floor(local.x + N / 2),
+        y = Math.floor(local.z + N / 2)
+      if (inBoard(x, y)) return { kind: "cell", cell: cellAt(x, y) }
+    }
     return { kind: "none" }
   }
 
@@ -335,6 +411,7 @@ export class Board3D extends EventTarget {
     }
 
     this.selection.material.opacity = 0.7 + Math.sin(now / 200) * 0.25
+    this.scenery.update(now / 1000)
     this.renderer.render(this.scene, this.camera)
   }
 }

@@ -34,7 +34,10 @@ export class Hud {
 
   /** True if the screen point is over an interactive HUD element (so the board should ignore it) */
   isOverHud(x: number, y: number) {
-    return this.app.renderer.events.rootBoundary.hitTest(x, y) !== null
+    const boundary = this.app.renderer.events.rootBoundary
+    // pixi only sets its root target once it has handled its first pointer event
+    if (!boundary.rootTarget) return false
+    return boundary.hitTest(x, y) !== null
   }
 
   update(patch: Partial<HudModel>) {
