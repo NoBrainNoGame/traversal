@@ -4,6 +4,8 @@ export interface HudButton {
   label: string
   onClick: () => void
   active?: boolean
+  /** Starts a new row of buttons under this caption */
+  caption?: string
 }
 
 export interface HudModel {
@@ -128,6 +130,14 @@ export class Hud {
     y += 10
     let bx = 24
     modal.buttons.forEach((b, i) => {
+      if (b.caption) {
+        if (bx > 24) y += 46
+        const caption = text(b.caption, { fill: 0xb8bdc9, wordWrap: true, wordWrapWidth: width - 48 })
+        caption.position.set(24, y)
+        box.addChild(caption)
+        y += caption.height + 8
+        bx = 24
+      }
       const label = text(b.label, { fontWeight: "600", fill: b.active ? 0x15171c : 0xe8eaf0 })
       const bw = label.width + 28,
         bh = 36

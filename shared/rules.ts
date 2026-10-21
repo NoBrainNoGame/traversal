@@ -72,6 +72,22 @@ export interface GameState {
   winner: Seat | null
   reason: string
   last: { action: Action; path: number[]; captured: number | null } | null
+  /** Set when the game is played on traversalgame.com: the official server decides what is legal */
+  official?: OfficialInfo
+}
+
+export interface OfficialInfo {
+  gameId: string
+  terrain: string
+  usernames: [string, string]
+  /** Legal actions per piece id, for the side to move, as the official server lists them */
+  moves: Record<number, LegalAction[]>
+  /** What each piece could do if it were its turn, both sides */
+  scope: Record<number, LegalAction[]>
+  /** Remaining time per seat as of `clockStartedAt` (server epoch ms, null while stopped); null when untimed */
+  clocks: [number, number] | null
+  clockStartedAt: number | null
+  serverTime: number
 }
 
 export const cellX = (c: number) => c % N
@@ -252,6 +268,7 @@ function attackStrength(state: GameState, attacker: Piece, target: Piece, vangua
 export function legalActions(state: GameState, pieceId: number): LegalAction[] {
   const piece = state.pieces[pieceId]
   if (!piece || piece.status !== "board" || piece.owner !== state.turn || state.over) return []
+  if (state.official) return state.official.moves[pieceId] ?? []
   return pieceActions(state, piece, false)
 }
 
@@ -262,6 +279,7 @@ export function legalActions(state: GameState, pieceId: number): LegalAction[] {
 export function pieceScope(state: GameState, pieceId: number): LegalAction[] {
   const piece = state.pieces[pieceId]
   if (!piece || piece.status !== "board") return []
+  if (state.official) return state.official.scope[pieceId] ?? []
   return pieceActions(state, piece, true)
 }
 

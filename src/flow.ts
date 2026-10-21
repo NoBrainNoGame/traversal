@@ -1,7 +1,8 @@
 import { ChipBase, Composite, Signal, StateMachine } from "@ghom/booyah"
 import { legalActions, PIECES, pieceAt, pieceScope, TERRAIN_MODES, type GameState, type LegalAction, type Seat, type TerrainMode } from "../shared/rules"
+import type { OfficialKind, OfficialStatus } from "../shared/protocol"
 import type { Board3D, Pick, ScopeMark } from "./board3d"
-import type { Hud } from "./hud"
+import type { Hud, HudButton } from "./hud"
 import type { Net } from "./net"
 
 /** Everything the client knows, fed by the network; emits "change" */
@@ -12,6 +13,10 @@ export class Session extends EventTarget {
   connected: [boolean, boolean] = [false, false]
   lobbyMode: TerrainMode = "balanced"
   state: GameState | null = null
+  /** Set while a game on traversalgame.com is being set up or played */
+  official: OfficialStatus | null = null
+  /** When the last state arrived (local clock), to run the official clocks between updates */
+  stateReceivedAt = 0
 
   set(patch: Partial<Session>) {
     Object.assign(this, patch)
@@ -23,10 +28,15 @@ export class Session extends EventTarget {
   }
 }
 
-type Phase = "connecting" | "lobby" | "playing" | "over"
+type Phase = "connecting" | "lobby" | "official" | "playing" | "over"
 
 function phaseOf(session: Session): Phase {
   if (!session.online) return "connecting"
+  if (session.official) {
+    const { phase } = session.official
+    if ((phase === "playing" || phase === "over") && session.state?.official) return session.state.over ? "over" : "playing"
+    return "official"
+  }
   if (!session.state) return "lobby"
   return session.state.over ? "over" : "playing"
 }
@@ -116,6 +126,21 @@ class Connecting extends PhaseChip {
   }
 }
 
+const OFFICIAL_KINDS: [OfficialKind, string][] = [
+  ["bot", "Contre un bot"],
+  ["match", "Matchmaking"],
+  ["friend", "Inviter un ami"],
+]
+
+function officialButtons(session: Session, net: Net) {
+  if (session.seat === null && !session.official) return []
+  return OFFICIAL_KINDS.map(([kind, label], i) => ({
+    label,
+    caption: i === 0 ? "Sur traversalgame.com (avec ta session Firefox) :" : undefined,
+    onClick: () => net.send({ t: "official", kind }),
+  }))
+}
+
 function terrainButtons(session: Session, net: Net, current: TerrainMode) {
   if (session.seat === null) return []
   return Object.entries(TERRAIN_MODES).map(([mode, label]) => ({
@@ -141,9 +166,39 @@ class Lobby extends PhaseChip {
             "En attente de ton ami…",
             s.urls.length ? `Il doit ouvrir : ${s.urls.join("  ou  ")}` : "Aucune adresse réseau trouvée sur cette machine.",
             "",
-            "Terrain :",
+            "Partie locale, terrain :",
           ]
-    this.hud.update({ modal: { title: "Traversal", body, buttons: terrainButtons(s, this.net, s.lobbyMode) } })
+    this.hud.update({ modal: { title: "Traversal", body, buttons: [...terrainButtons(s, this.net, s.lobbyMode), ...officialButtons(s, this.net)] } })
+  }
+}
+
+/** Setting up a game on traversalgame.com: searching, waiting for a friend, or an error */
+class Official extends PhaseChip {
+  protected readonly phase = "official"
+
+  protected enter() {
+    this.board.showActions(null, [])
+    this.board.showHover(null)
+    this.board.showScope([])
+    this.refresh()
+  }
+
+  protected refresh() {
+    const status = this.session.official
+    if (!status) return
+    const leave = (label: string) => ({ label, onClick: () => this.net.send({ t: "officialLeave" }) })
+    const body = [status.message]
+    if (status.link) body.push("", status.link)
+    let buttons: HudButton[] = [leave("Annuler")]
+    if (status.phase === "ghost")
+      buttons = [
+        { label: "Jouer contre le bot", active: true, onClick: () => this.net.send({ t: "officialGhost", accept: true }) },
+        { label: "Continuer à chercher", onClick: () => this.net.send({ t: "officialGhost", accept: false }) },
+        leave("Annuler"),
+      ]
+    else if (status.phase === "error") buttons = [leave("Retour")]
+    if (status.link) buttons.unshift({ label: "Copier le lien", active: true, onClick: () => void navigator.clipboard?.writeText(status.link!) })
+    this.hud.update({ turn: "", info: [], modal: { title: "traversalgame.com", body, buttons } })
   }
 }
 
@@ -162,7 +217,14 @@ class Over extends PhaseChip {
       state = s.state!
     const title =
       state.winner === null ? "Match nul" : s.seat === null ? `${state.winner === 0 ? "Rouge" : "Bleu"} gagne` : state.winner === s.seat ? "Victoire !" : "Défaite"
-    const body = [state.reason + ".", `Score : Rouge ${state.score[0]} – ${state.score[1]} Bleu`, "", "Rejouer sur :"]
+    const body = [state.reason + ".", `Score : Rouge ${state.score[0]} – ${state.score[1]} Bleu`, ""]
+    if (s.official) {
+      const buttons: HudButton[] = [...officialButtons(s, this.net), { label: "Revenir au mode local", caption: "Ou bien :", onClick: () => this.net.send({ t: "officialLeave" }) }]
+      buttons[0] = { ...buttons[0], caption: "Rejouer sur traversalgame.com :" }
+      this.hud.update({ turn: "", info: [], modal: { title, body, buttons } })
+      return
+    }
+    body.push("Rejouer sur :")
     this.hud.update({ turn: "", info: [], modal: { title, body, buttons: terrainButtons(s, this.net, state.mode) } })
   }
 }
@@ -174,7 +236,8 @@ class Playing extends Composite {
     this.chipContext.hud.update({ modal: null })
     this._subscribe(session, "change", () => {
       const phase = phaseOf(session)
-      if (phase !== "playing" && this.state === "active") this.terminate(new Signal(phase))
+      if (phase !== "playing" && this.state === "active") return this.terminate(new Signal(phase))
+      this.showDrawOffer()
     })
     this._activateChildChip(
       new StateMachine(
@@ -183,9 +246,27 @@ class Playing extends Composite {
       ),
     )
   }
+
+  private showDrawOffer() {
+    this.chipContext.hud.update({ modal: drawOfferModal(this.chipContext.session, this.chipContext.net) })
+  }
 }
 
 // ------------------------------------------------------------------ turn states
+
+/** On traversalgame.com the opponent can offer a draw */
+function drawOfferModal(session: Session, net: Net) {
+  const from = session.official?.drawOffer
+  if (!from) return null
+  return {
+    title: "Proposition de nulle",
+    body: [`${from} propose une partie nulle.`],
+    buttons: [
+      { label: "Accepter", active: true, onClick: () => net.send({ t: "officialDraw", accept: true }) },
+      { label: "Refuser", onClick: () => net.send({ t: "officialDraw", accept: false }) },
+    ],
+  }
+}
 
 /** Opponent's turn (or spectating) */
 class Waiting extends AppChip {
@@ -322,6 +403,7 @@ export function makeAppMachine() {
     {
       connecting: () => new Connecting(),
       lobby: () => new Lobby(),
+      official: () => new Official(),
       playing: () => new Playing(),
       over: () => new Over(),
     },
