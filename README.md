@@ -25,7 +25,7 @@ Le premier connecté joue Rouge, le second Bleu, les suivants regardent. Recharg
 
 ## Jouer sur traversalgame.com
 
-Avec l'accord du développeur du jeu, le lobby peut lancer une partie sur le site officiel :
+Le lobby peut lancer une partie sur le site officiel :
 « Contre un bot », « Matchmaking » ou « Inviter un ami » (lien d'invitation à envoyer).
 
 - Il faut être connecté sur traversalgame.com dans **Firefox** : le serveur local réutilise cette session
