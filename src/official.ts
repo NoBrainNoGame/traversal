@@ -1,23 +1,29 @@
-// Plays games on traversalgame.com (with its developer's permission) through the user's Firefox session.
+// Plays games on traversalgame.com (with its developer's permission) through the Cloudflare relay (see relay.ts).
 // The official server stays authoritative: its states are translated into ours for the 3D client, our actions
 // into its moves. Protocol notes: REST on api.traversalgame.com, one WebSocket per game, JSON {type, payload}.
 
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
-import { homedir, tmpdir } from "node:os"
-import { join } from "node:path"
-import { DatabaseSync } from "node:sqlite"
-import { WebSocket } from "ws"
 import { cellAt, cellX, cellY, goalRow, inBoard, N, pieceScope, type Action, type GameState, type LegalAction, type Piece, type PieceType, type Seat } from "../shared/rules"
-import type { OfficialKind, OfficialStatus } from "../shared/protocol"
+import { account, errorMessage, OfficialError, type ApiResult } from "./relay"
 
-const API = "https://api.traversalgame.com"
 const SITE = "https://www.traversalgame.com"
-const USER_AGENT = "TraversalNoBrainNoGameClient/1.0 (unofficial client, https://github.com/NoBrainNoGame/traversal)"
 const BOT_DIFFICULTY = 5
 const TIME_CONTROL = "10+0"
-const FIREFOX_DIRS = [".mozilla/firefox", "snap/firefox/common/.mozilla/firefox", ".var/app/org.mozilla.firefox/.mozilla/firefox"]
 /** Close codes after which the official web client gives up instead of reconnecting */
 const TERMINAL_CLOSE = [4001, 4003, 4004, 4008]
+
+export type OfficialKind = "bot" | "match" | "friend"
+
+/** Where a game on traversalgame.com stands, before and during play */
+export interface OfficialStatus {
+  phase: "starting" | "searching" | "ghost" | "waiting" | "playing" | "over" | "error"
+  message: string
+  /** Invite link to send to a friend */
+  link?: string
+  /** The session is missing or expired: offer to log in */
+  login?: boolean
+  /** Username of an opponent offering a draw */
+  drawOffer?: string
+}
 
 const REASONS: Record<string, string> = {
   resign: "Abandon",
@@ -33,119 +39,6 @@ const REASONS: Record<string, string> = {
   insufficient_moves: "Pas assez de coups joués",
 }
 const VICTORIES: Record<string, string> = { total_domination: "Domination totale", perfect_game: "Partie parfaite" }
-
-class OfficialError extends Error {
-  /** The fix is to log in on the site */
-  login = false
-}
-
-/** The Firefox session is missing or expired */
-const loginError = (message: string) => Object.assign(new OfficialError(message), { login: true })
-
-// ------------------------------------------------------------------ session cookies
-
-/** The traversalgame.com cookies of the most recently used Firefox session (outside containers) */
-function firefoxCookies() {
-  const latest = new Map<string, { value: string; at: number }>()
-  for (const dir of FIREFOX_DIRS) {
-    const root = join(homedir(), dir)
-    if (!existsSync(root)) continue
-    for (const profile of readdirSync(root)) {
-      const db = join(root, profile, "cookies.sqlite")
-      if (!existsSync(db)) continue
-      // Firefox keeps the database locked and its latest writes in the WAL file: read a copy of both
-      const tmp = mkdtempSync(join(tmpdir(), "traversal-cookies-"))
-      try {
-        copyFileSync(db, join(tmp, "cookies.sqlite"))
-        if (existsSync(db + "-wal")) copyFileSync(db + "-wal", join(tmp, "cookies.sqlite-wal"))
-        const sql = new DatabaseSync(join(tmp, "cookies.sqlite"))
-        const rows = sql
-          .prepare("SELECT name, value, lastAccessed FROM moz_cookies WHERE host LIKE '%traversalgame.com' AND originAttributes = ''")
-          .all() as { name: string; value: string; lastAccessed: number }[]
-        sql.close()
-        for (const row of rows) {
-          const at = Number(row.lastAccessed)
-          if ((latest.get(row.name)?.at ?? -1) < at) latest.set(row.name, { value: row.value, at })
-        }
-      } catch {
-        // An unreadable profile is skipped
-      } finally {
-        rmSync(tmp, { recursive: true, force: true })
-      }
-    }
-  }
-  return new Map([...latest].map(([name, { value }]) => [name, value]))
-}
-
-/** Cookies sent to the API, kept up to date from Firefox and from the API's own Set-Cookie headers */
-class Jar {
-  private cookies = new Map<string, string>()
-
-  loadFromFirefox() {
-    const fresh = firefoxCookies()
-    if (fresh.size) this.cookies = fresh
-    return fresh.size > 0
-  }
-
-  /** Like the browser: the refresh cookie only goes to the refresh route */
-  header(path: string) {
-    return [...this.cookies]
-      .filter(([name]) => name !== "traversal_refresh" || path.startsWith("/auth/refresh"))
-      .map(([name, value]) => `${name}=${value}`)
-      .join("; ")
-  }
-
-  absorb(res: Response) {
-    for (const line of res.headers.getSetCookie()) {
-      const pair = line.split(";")[0]
-      const eq = pair.indexOf("=")
-      const name = pair.slice(0, eq).trim(),
-        value = pair.slice(eq + 1).trim()
-      if (!value || /max-age=0\b/i.test(line)) this.cookies.delete(name)
-      else this.cookies.set(name, value)
-    }
-  }
-}
-
-const jar = new Jar()
-
-const headers = (path: string) => ({ cookie: jar.header(path), origin: SITE, referer: SITE + "/", "user-agent": USER_AGENT })
-
-function errorMessage(data: any, fallback: string): string {
-  const detail = data?.detail
-  if (typeof detail === "string") return detail
-  if (typeof detail?.message === "string") return detail.message
-  if (typeof data?.message === "string") return data.message
-  if (typeof data?.code === "string") return data.code
-  return fallback
-}
-
-/** Calls the API; on 401, first rereads Firefox's cookies (the site may have refreshed them), then refreshes the session itself */
-async function api(path: string, method = "GET", body?: unknown) {
-  const call = async () => {
-    const res = await fetch(API + path, {
-      method,
-      headers: { ...headers(path), ...(body !== undefined ? { "content-type": "application/json" } : {}) },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-    jar.absorb(res)
-    return res
-  }
-  let res = await call()
-  if (res.status === 401 && jar.loadFromFirefox()) res = await call()
-  if (res.status === 401) {
-    const refresh = await fetch(API + "/auth/refresh", { method: "POST", headers: headers("/auth/refresh") })
-    jar.absorb(refresh)
-    if (refresh.ok) res = await call()
-  }
-  if (res.status === 401) throw loginError("Session expirée : reconnecte-toi sur traversalgame.com dans Firefox, puis réessaie.")
-  const text = await res.text()
-  let data: any = null
-  try {
-    data = JSON.parse(text)
-  } catch {}
-  return { status: res.status, ok: res.ok, data }
-}
 
 // ------------------------------------------------------------------ official shapes
 
@@ -190,8 +83,8 @@ export class OfficialGame {
   seat: Seat | null = null
   private gameId: string | null = null
   private ws: WebSocket | null = null
-  private poll: NodeJS.Timeout | null = null
-  private reconnect: NodeJS.Timeout | null = null
+  private poll = 0
+  private reconnect = 0
   private closed = false
   private refreshedForSocket = false
   /** Our piece id -> official piece id */
@@ -206,25 +99,24 @@ export class OfficialGame {
 
   async start(kind: OfficialKind) {
     try {
-      if (!jar.loadFromFirefox()) throw loginError("Aucune session traversalgame.com trouvée dans Firefox : connecte-toi sur le site avec Firefox, puis réessaie.")
-      const me = await api("/me")
+      const me = await account.api("/me")
       if (!me.ok) throw new OfficialError(errorMessage(me.data, "Impossible de lire ton compte traversalgame.com."))
       const name = me.data?.username ?? "toi"
       if (kind === "bot") {
         this.setStatus("starting", `Connecté en tant que ${name}. Création d'une partie contre un bot (niveau ${BOT_DIFFICULTY})…`)
-        const res = await api("/api/games/vs-bot", "POST", { terrain: "random", difficulty: BOT_DIFFICULTY, player_side: null, time_control: TIME_CONTROL })
+        const res = await account.api("/api/games/vs-bot", "POST", { terrain: "random", difficulty: BOT_DIFFICULTY, player_side: null, time_control: TIME_CONTROL })
         this.openGame(res, "Impossible de créer la partie contre le bot.")
       } else if (kind === "friend") {
         this.setStatus("starting", `Connecté en tant que ${name}. Création d'une partie privée…`)
-        const res = await api("/api/games", "POST", { terrain: "random", play_as: "random", private: true, ranked: false })
+        const res = await account.api("/api/games", "POST", { terrain: "random", play_as: "random", private: true, ranked: false })
         this.openGame(res, "Impossible de créer la partie privée.")
       } else {
         this.setStatus("searching", `Connecté en tant que ${name}. Recherche d'un adversaire…`)
-        const res = await api("/api/games/find", "POST", { terrain: "random", ranked: false })
+        const res = await account.api("/api/games/find", "POST", { terrain: "random", ranked: false })
         if (this.resumeActive(res)) return
         if (!res.ok) throw new OfficialError(errorMessage(res.data, "Impossible de lancer la recherche."))
         this.onFindStatus(res.data)
-        if (!this.gameId) this.poll = setInterval(() => this.checkFind(), 2000)
+        if (!this.gameId) this.poll = window.setInterval(() => this.checkFind(), 2000)
       }
     } catch (e) {
       this.fail(e)
@@ -232,7 +124,7 @@ export class OfficialGame {
   }
 
   /** A 409 means a game is already going on for this account: play that one */
-  private resumeActive(res: { status: number; data: any }) {
+  private resumeActive(res: ApiResult) {
     const id = res.status === 409 ? res.data?.detail?.game_id : null
     if (!id) return false
     this.onNotice("Tu as déjà une partie en cours sur le site : reprise de cette partie.")
@@ -240,7 +132,7 @@ export class OfficialGame {
     return true
   }
 
-  private openGame(res: { ok: boolean; status: number; data: any }, fallback: string) {
+  private openGame(res: ApiResult, fallback: string) {
     if (this.resumeActive(res)) return
     if (!res.ok || !res.data?.game_id) throw new OfficialError(errorMessage(res.data, fallback))
     this.connect(res.data.game_id)
@@ -249,7 +141,7 @@ export class OfficialGame {
   private async checkFind() {
     if (this.closed) return
     try {
-      const res = await api("/api/games/find/status")
+      const res = await account.api("/api/games/find/status")
       if (res.ok) this.onFindStatus(res.data)
     } catch (e) {
       this.fail(e)
@@ -268,11 +160,11 @@ export class OfficialGame {
   async answerGhost(accept: boolean) {
     try {
       if (!accept) {
-        await api("/api/games/find/decline-bot", "POST")
+        await account.api("/api/games/find/decline-bot", "POST")
         this.setStatus("searching", "Recherche d'un adversaire…")
         return
       }
-      const res = await api("/api/games/find/accept-bot", "POST")
+      const res = await account.api("/api/games/find/accept-bot", "POST")
       if (res.ok && res.data?.game_id) {
         this.stopPolling()
         this.connect(res.data.game_id)
@@ -319,11 +211,11 @@ export class OfficialGame {
     const phase = this.status.phase
     this.closed = true
     this.stopPolling()
-    if (this.reconnect) clearTimeout(this.reconnect)
+    clearTimeout(this.reconnect)
     this.ws?.close()
     try {
-      if (phase === "searching" || phase === "ghost") await api("/api/games/find", "DELETE")
-      if (phase === "waiting" && this.gameId) await api(`/api/games/${this.gameId}/cancel`, "POST")
+      if (phase === "searching" || phase === "ghost") await account.api("/api/games/find", "DELETE")
+      if (phase === "waiting" && this.gameId) await account.api(`/api/games/${this.gameId}/cancel`, "POST")
     } catch {}
   }
 
@@ -333,19 +225,17 @@ export class OfficialGame {
     if (this.closed) return
     this.gameId = gameId
     if (this.status.phase !== "playing") this.setStatus("starting", "Connexion à la partie…")
-    const path = `/ws/${gameId}`
-    const ws = new WebSocket(API.replace("https", "wss") + path, { headers: headers(path) })
+    const ws = new WebSocket(account.socketUrl(`/ws/${gameId}`))
     this.ws = ws
-    ws.on("message", (data) => {
+    ws.addEventListener("message", (e) => {
       try {
-        const msg = JSON.parse(String(data))
+        const msg = JSON.parse(String(e.data))
         this.onMessage(msg.type, msg.payload ?? {})
-      } catch (e) {
-        console.error("[officiel] message illisible :", e)
+      } catch (err) {
+        console.error("[officiel] message illisible :", err)
       }
     })
-    ws.on("close", (code) => this.onClose(ws, code))
-    ws.on("error", (e) => console.error("[officiel] erreur WebSocket :", e.message))
+    ws.addEventListener("close", (e) => this.onClose(ws, e.code))
   }
 
   private async onClose(ws: WebSocket, code: number) {
@@ -354,14 +244,14 @@ export class OfficialGame {
       // Not authenticated: refresh the session once, then reconnect
       this.refreshedForSocket = true
       try {
-        await api("/me")
+        await account.api("/me")
       } catch (e) {
         return this.fail(e)
       }
     } else if (TERMINAL_CLOSE.includes(code)) {
       return this.fail(new OfficialError(`Le serveur officiel a fermé la connexion (code ${code}).`))
     }
-    this.reconnect = setTimeout(() => this.gameId && this.connect(this.gameId), 2000)
+    this.reconnect = window.setTimeout(() => this.gameId && this.connect(this.gameId), 2000)
   }
 
   private send(type: string, payload: unknown) {
@@ -500,14 +390,14 @@ export class OfficialGame {
     console.error("[officiel]", message)
     this.setStatus("error", message)
     if (e instanceof OfficialError && e.login) {
-      this.status.login = `${SITE}/login`
+      this.status.login = true
       this.onChange()
     }
   }
 
   private stopPolling() {
-    if (this.poll) clearInterval(this.poll)
-    this.poll = null
+    clearInterval(this.poll)
+    this.poll = 0
   }
 }
 

@@ -1,11 +1,13 @@
 {
   "name": "traversal",
   "version": "1.0.0",
-  "description": "Traversal en local / LAN (three.js, pixi.js, booyah)",
+  "description": "Client 3D de Traversal : en local / LAN, ou sur traversalgame.com (three.js, pixi.js, booyah)",
   "scripts": {
     "start": "vite build && tsx server/server.ts",
     "build": "vite build",
+    "build:pages": "vite build --mode pages",
     "server": "tsx server/server.ts",
+    "relay:deploy": "wrangler deploy --config relay/wrangler.toml",
     "typecheck": "tsc"
   },
   "type": "module",

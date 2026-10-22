@@ -96,7 +96,7 @@ export class Hud {
     const barBg = this.panel(Math.min(W - 20, right.x + right.width + 16), 42)
     bar.addChildAt(barBg, 0)
     bar.position.set(10, 10)
-    stage.addChild(bar)
+    if (m.status.length || m.turn || m.right.length) stage.addChild(bar)
 
     // Info panel (selected piece, attack preview, controls)
     if (m.info.length) {

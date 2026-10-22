@@ -1,5 +1,7 @@
 # Traversal (local / LAN / traversalgame.com)
 
+**Jouer en ligne : https://nobrainnogame.github.io/traversal/** (parties traversalgame.com, sans rien installer)
+
 Client 3D du jeu [Traversal](https://www.traversalgame.com/rules), fait avec three.js (plateau 3D),
 pixi.js (interface) et @ghom/booyah (state machines). On peut y jouer à deux en local ou en réseau,
 ou jouer des parties du site officiel depuis ce client. Projet perso, non officiel.
@@ -34,13 +36,16 @@ Le premier connecté joue Rouge, le second Bleu, les suivants regardent. Recharg
 
 ## Jouer sur traversalgame.com
 
-Le lobby peut lancer une partie sur le site officiel :
+Depuis [la version en ligne](https://nobrainnogame.github.io/traversal/) ou le lobby local :
 « Contre un bot », « Matchmaking » ou « Inviter un ami » (lien d'invitation à envoyer).
 
-- Il faut être connecté sur traversalgame.com dans **Firefox** : le serveur local réutilise cette session
-  (cookies du profil Firefox, lus en local, jamais affichés).
-- Le serveur local fait l'intermédiaire avec le site : il crée la partie, suit son état en direct et
-  envoie tes coups. Le site reste l'arbitre : les coups légaux sont ceux qu'il fournit.
+- La première fois, le client demande l'e-mail et le mot de passe de ton compte traversalgame.com. La session reste
+  ensuite dans ce navigateur (menu pause ou lobby → « Se déconnecter »).
+- Le site n'accepte que les requêtes venant de lui-même et garde la session dans des cookies inaccessibles à une
+  autre page : le client passe donc par un petit relais Cloudflare (`relay/worker.ts`). Il appelle l'API au nom de
+  www.traversalgame.com et rend la session au client sous forme de jeton. Il ne stocke rien.
+- Le site reste l'arbitre : il crée la partie, l'état arrive en direct par WebSocket, et les coups légaux
+  sont ceux qu'il fournit.
 - La barre du haut affiche les pseudos et les pendules (10 min par joueur). Une proposition de nulle
   de l'adversaire ouvre une fenêtre Accepter / Refuser.
 - Si ton compte a déjà une partie en cours sur le site, elle est reprise au lieu d'en créer une nouvelle.
@@ -67,7 +72,7 @@ Le lobby peut lancer une partie sur le site officiel :
 
 Reprendre · relancer la partie · échanger les camps · nouvelle partie locale sur un autre terrain · partie sur
 traversalgame.com (bot, matchmaking, invitation) ou retour au local · proposer la nulle / abandonner sur le site ·
-recentrer la vue · webcam et micro.
+recentrer la vue · webcam et micro · déconnexion du compte traversalgame.com. En ligne, seules les options du site restent.
 
 ## Commandes
 
@@ -83,8 +88,13 @@ Un glissé n'est jamais pris pour un clic (tolérance de 6 px), et cliquer sur u
 
 - `shared/rules.ts` : règles, génération de terrain, coups légaux et portée (utilisé par le serveur et le client)
 - `server/server.ts` : serveur HTTP + HTTPS (auto-signé, pour la webcam) + WebSocket, fait autorité sur la partie locale, relaie le chat et la signalisation WebRTC
-- `server/official.ts` : intermédiaire avec traversalgame.com (session Firefox, création de partie, traduction des états et des coups)
+- `src/host.ts` : d'où vient la partie (serveur local, ou traversalgame.com joué depuis la page)
+- `src/official.ts` : parties sur traversalgame.com (création, traduction des états et des coups) · `src/relay.ts` : compte et appels à l'API via le relais · `src/login.ts` : formulaire de connexion
+- `relay/worker.ts` : le relais Cloudflare (`npm run relay:deploy`)
 - `src/flow.ts` : state machines booyah (connexion → lobby → partie → fin ; et tour : attente / sélection / envoi)
 - `src/board3d.ts` : rendu three.js et sélection · `src/scenery.ts` : relief, décor, barrières · `src/characters.ts` : personnages et badges
 - `src/hud.ts` : interface pixi.js · `src/pause.ts` : menu pause
 - `src/chat.ts` : chat et emotes · `src/webcam.ts` : webcams en WebRTC
+
+La version en ligne est construite par `npm run build:pages` (sans serveur local : ni partie locale, ni chat, ni webcam)
+et publiée sur GitHub Pages à chaque push sur `main` (`.github/workflows/pages.yml`).

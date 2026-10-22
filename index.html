@@ -27,6 +27,20 @@
       #webcams .webcam-local { transform: scaleX(-1); }
       #webcams video[hidden] { display: none; }
       #webcams .webcam-local { width: 40%; margin: 8px 0 0 auto; }
+      #login { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); font: 15px system-ui, -apple-system, Segoe UI, sans-serif; color: #e8eaf0; }
+      #login[hidden] { display: none; }
+      #login form { display: flex; flex-direction: column; gap: 10px; width: min(360px, calc(100% - 32px)); padding: 20px; border-radius: 10px; background: rgba(14, 16, 20, 0.95); box-sizing: border-box; }
+      #login h2 { margin: 0 0 4px; font-size: 18px; }
+      #login input { padding: 9px 10px; border: 1px solid #2b3040; border-radius: 8px; background: #15171c; color: inherit; font: inherit; outline: none; }
+      #login input:focus { border-color: #ffe066; }
+      #login p { margin: 0; }
+      .login-error { color: #ff8080; }
+      .login-error:empty { display: none; }
+      .login-note { font-size: 13px; color: #9aa0ab; }
+      .login-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+      .login-buttons button { padding: 8px 14px; border: 0; border-radius: 8px; background: #2b3040; color: inherit; font: inherit; cursor: pointer; }
+      .login-buttons button[type="submit"] { background: #ffe066; color: #15171c; }
+      .login-buttons button:disabled { opacity: 0.6; cursor: wait; }
     </style>
   </head>
   <body>
@@ -36,6 +50,7 @@
     </div>
     <div id="webcams"></div>
     <div id="chat"></div>
+    <div id="login"></div>
     <pre id="crash" style="position:absolute;left:12px;bottom:12px;color:#ff8080;font:13px monospace;white-space:pre-wrap;margin:0"></pre>
     <script>
       // Show startup errors on screen instead of a blank page

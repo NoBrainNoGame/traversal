@@ -8,7 +8,6 @@ import { generate } from "selfsigned"
 import { WebSocketServer, WebSocket } from "ws"
 import { applyAction, newGame, TERRAIN_MODES, type GameState, type Seat, type TerrainMode } from "../shared/rules"
 import type { ChatMessage, ClientMessage, ServerMessage } from "../shared/protocol"
-import { OfficialGame } from "./official"
 
 const PORT = Number(process.env.PORT ?? 3000)
 /** Browsers only give the camera to secure pages: a friend on the network uses this https port for the webcam */
@@ -69,8 +68,6 @@ const seats: [string | null, string | null] = [null, null]
 const sockets = new Map<WebSocket, Seat | null>()
 let mode: TerrainMode = "balanced"
 let game: GameState | null = null
-/** A game on traversalgame.com; while it exists, every client shows it instead of the local game */
-let official: OfficialGame | null = null
 const chat: ChatMessage[] = []
 const CHAT_HISTORY = 60
 const TEAMS = ["Rouge", "Bleu"]
@@ -83,25 +80,13 @@ function send(ws: WebSocket, msg: ServerMessage) {
 
 function broadcast() {
   for (const ws of sockets.keys()) {
-    if (official) {
-      send(ws, { t: "official", status: official.status, seat: official.seat })
-      if (official.state) send(ws, { t: "state", state: official.state, connected: [true, true] })
-    } else if (game) send(ws, { t: "state", state: game, connected: connected() })
+    if (game) send(ws, { t: "state", state: game, connected: connected() })
     else send(ws, { t: "lobby", connected: connected(), mode })
   }
 }
 
 function notice(message: string) {
   for (const ws of sockets.keys()) send(ws, { t: "error", message })
-}
-
-async function leaveOfficial() {
-  const leaving = official
-  official = null
-  // Back to the local game: everyone gets their own seat again
-  for (const [ws, seat] of sockets) send(ws, { t: "official", status: null, seat })
-  broadcast()
-  await leaving?.leave()
 }
 
 function claimSeat(token?: string): { seat: Seat | null; token: string } {
@@ -154,15 +139,9 @@ function onConnection(ws: WebSocket) {
       sockets.set(ws, claim.seat)
       send(ws, { t: "welcome", seat: claim.seat, token: claim.token, urls: lanUrls(), secureUrls: secureUrls() })
       send(ws, { t: "chat", messages: chat, reset: true })
-      if (official) return broadcast()
       if (!game && seats[0] && seats[1]) game = newGame(mode)
       broadcast()
     } else if (msg.t === "action") {
-      if (official) {
-        const error = seat === null ? "Tu regardes la partie." : official.play(msg.action)
-        if (error) send(ws, { t: "error", message: error })
-        return
-      }
       if (!game || seat === null || game.turn !== seat) return send(ws, { t: "error", message: "Ce n'est pas ton tour." })
       if (game.pieces[msg.action?.pieceId]?.owner !== seat) return send(ws, { t: "error", message: "Pièce invalide." })
       const next = applyAction(game, msg.action)
@@ -179,36 +158,15 @@ function onConnection(ws: WebSocket) {
       // Spectators can't restart or steer games
     } else if (msg.t === "newGame") {
       if (!(msg.mode in TERRAIN_MODES)) return
-      if (official?.live) return send(ws, { t: "error", message: "Abandonne d'abord la partie sur traversalgame.com." })
-      const restarted = !!game && !game.over && !official
+      const restarted = !!game && !game.over
       mode = msg.mode
       // Before both players are there, this only picks the terrain
       if (game) game = newGame(mode)
-      if (official) void leaveOfficial()
-      else broadcast()
+      broadcast()
       if (restarted) notice(`${TEAMS[seat]} a relancé la partie.`)
     } else if (msg.t === "swapSeats") {
-      if (official) return send(ws, { t: "error", message: "Les camps sont fixés par traversalgame.com." })
       swapSeats()
       notice("Les camps ont été échangés.")
-    } else if (msg.t === "official") {
-      if (official?.live) return send(ws, { t: "error", message: "Une partie est déjà en cours sur traversalgame.com." })
-      // A finished game or a pending search is replaced by the new one
-      const previous = official
-      official = new OfficialGame(broadcast, notice)
-      broadcast()
-      void previous?.leave()
-      void official.start(msg.kind)
-    } else if (msg.t === "officialOfferDraw") {
-      official?.offerDraw()
-    } else if (msg.t === "officialResign") {
-      official?.resign()
-    } else if (msg.t === "officialLeave") {
-      void leaveOfficial()
-    } else if (msg.t === "officialGhost") {
-      void official?.answerGhost(msg.accept)
-    } else if (msg.t === "officialDraw") {
-      official?.answerDraw(msg.accept)
     }
   })
 

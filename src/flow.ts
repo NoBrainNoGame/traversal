@@ -1,11 +1,12 @@
 import { ChipBase, Composite, Signal, StateMachine } from "@ghom/booyah"
 import { legalActions, PIECES, pieceAt, pieceScope, TERRAIN_MODES, type GameState, type LegalAction, type Seat, type TerrainMode } from "../shared/rules"
-import type { OfficialKind, OfficialStatus } from "../shared/protocol"
 import type { Board3D, Pick, ScopeMark } from "./board3d"
+import { STANDALONE, type Host } from "./host"
 import type { Hud, HudButton } from "./hud"
-import type { Net } from "./net"
+import type { OfficialKind, OfficialStatus } from "./official"
+import { account } from "./relay"
 
-/** Everything the client knows, fed by the network; emits "change" */
+/** Everything the client knows, fed by the host; emits "change" */
 export class Session extends EventTarget {
   online = false
   seat: Seat | null = null
@@ -21,6 +22,8 @@ export class Session extends EventTarget {
   official: OfficialStatus | null = null
   /** When the last state arrived (local clock), to run the official clocks between updates */
   stateReceivedAt = 0
+  /** The traversalgame.com account: null when logged out, "" until its name is known */
+  account: string | null = null
 
   set(patch: Partial<Session>) {
     Object.assign(this, patch)
@@ -45,7 +48,7 @@ function phaseOf(session: Session): Phase {
   return session.state.over ? "over" : "playing"
 }
 
-const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom", "Échap : menu · Entrée : discuter"]
+const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom", STANDALONE ? "Échap : menu" : "Échap : menu · Entrée : discuter"]
 const SCOPE_LEGEND = "Vert : coût de déplacement · Rouge : bonus d'attaque (gris : attaque perdue)"
 
 function hoveredPiece(state: GameState, pick: Pick): number | undefined {
@@ -86,8 +89,8 @@ abstract class AppChip extends ChipBase {
     })
   }
 
-  protected get net(): Net {
-    return this.chipContext.net
+  protected get host(): Host {
+    return this.chipContext.host
   }
   protected get board(): Board3D {
     return this.chipContext.board
@@ -136,21 +139,30 @@ export const OFFICIAL_KINDS: [OfficialKind, string][] = [
   ["friend", "Inviter un ami"],
 ]
 
-function officialButtons(session: Session, net: Net) {
-  if (session.seat === null && !session.official) return []
+function officialButtons(session: Session, host: Host, caption = "Sur traversalgame.com :") {
+  if (session.seat === null && !session.official && !STANDALONE) return []
   return OFFICIAL_KINDS.map(([kind, label], i) => ({
     label,
-    caption: i === 0 ? "Sur traversalgame.com (avec ta session Firefox) :" : undefined,
-    onClick: () => net.send({ t: "official", kind }),
+    caption: i === 0 ? caption : undefined,
+    onClick: () => host.send({ t: "official", kind }),
   }))
 }
 
-function terrainButtons(session: Session, net: Net, current: TerrainMode) {
+/** Who is logged in on traversalgame.com, with the button to log out */
+export function accountLine(session: Session): { text: string; button: HudButton | null } {
+  if (session.account === null) return { text: "Pas connecté à traversalgame.com : ton e-mail et ton mot de passe te seront demandés.", button: null }
+  return {
+    text: `Connecté à traversalgame.com${session.account ? ` en tant que ${session.account}` : ""}.`,
+    button: { label: "Se déconnecter", onClick: () => void account.logout() },
+  }
+}
+
+function terrainButtons(session: Session, host: Host, current: TerrainMode) {
   if (session.seat === null) return []
   return Object.entries(TERRAIN_MODES).map(([mode, label]) => ({
     label,
     active: mode === current,
-    onClick: () => net.send({ t: "newGame", mode: mode as TerrainMode }),
+    onClick: () => host.send({ t: "newGame", mode: mode as TerrainMode }),
   }))
 }
 
@@ -163,6 +175,14 @@ class Lobby extends PhaseChip {
 
   protected refresh() {
     const s = this.session
+    if (STANDALONE) {
+      const { text, button } = accountLine(s)
+      const body = ["Joue tes parties traversalgame.com dans ce client 3D.", text, ""]
+      const buttons = officialButtons(s, this.host, "Nouvelle partie :")
+      if (button) buttons.push({ ...button, caption: "Compte :" })
+      this.hud.update({ modal: { title: "Traversal", body, buttons } })
+      return
+    }
     const body =
       s.seat === null
         ? ["La partie est déjà complète."]
@@ -173,7 +193,7 @@ class Lobby extends PhaseChip {
             "",
             "Partie locale, terrain :",
           ]
-    this.hud.update({ modal: { title: "Traversal", body, buttons: [...terrainButtons(s, this.net, s.lobbyMode), ...officialButtons(s, this.net)] } })
+    this.hud.update({ modal: { title: "Traversal", body, buttons: [...terrainButtons(s, this.host, s.lobbyMode), ...officialButtons(s, this.host)] } })
   }
 }
 
@@ -191,21 +211,18 @@ class Official extends PhaseChip {
   protected refresh() {
     const status = this.session.official
     if (!status) return
-    const leave = (label: string) => ({ label, onClick: () => this.net.send({ t: "officialLeave" }) })
+    const leave = (label: string) => ({ label, onClick: () => this.host.send({ t: "officialLeave" }) })
     const body = [status.message]
     if (status.link) body.push("", status.link)
     let buttons: HudButton[] = [leave("Annuler")]
     if (status.phase === "ghost")
       buttons = [
-        { label: "Jouer contre le bot", active: true, onClick: () => this.net.send({ t: "officialGhost", accept: true }) },
-        { label: "Continuer à chercher", onClick: () => this.net.send({ t: "officialGhost", accept: false }) },
+        { label: "Jouer contre le bot", active: true, onClick: () => this.host.send({ t: "officialGhost", accept: true }) },
+        { label: "Continuer à chercher", onClick: () => this.host.send({ t: "officialGhost", accept: false }) },
         leave("Annuler"),
       ]
     else if (status.phase === "error") buttons = [leave("Retour")]
-    if (status.login) {
-      const url = status.login
-      buttons.unshift({ label: "Se connecter sur traversalgame.com", active: true, onClick: () => void window.open(url, "_blank", "noopener") })
-    }
+    if (status.login) buttons.unshift({ label: "Se connecter", active: true, onClick: () => this.host.send({ t: "officialRetry" }) })
     if (status.link) buttons.unshift({ label: "Copier le lien", active: true, onClick: () => void navigator.clipboard?.writeText(status.link!) })
     this.hud.update({ turn: "", info: [], modal: { title: "traversalgame.com", body, buttons } })
   }
@@ -228,13 +245,13 @@ class Over extends PhaseChip {
       state.winner === null ? "Match nul" : s.seat === null ? `${state.winner === 0 ? "Rouge" : "Bleu"} gagne` : state.winner === s.seat ? "Victoire !" : "Défaite"
     const body = [state.reason + ".", `Score : Rouge ${state.score[0]} – ${state.score[1]} Bleu`, ""]
     if (s.official) {
-      const buttons: HudButton[] = [...officialButtons(s, this.net), { label: "Revenir au mode local", caption: "Ou bien :", onClick: () => this.net.send({ t: "officialLeave" }) }]
-      buttons[0] = { ...buttons[0], caption: "Rejouer sur traversalgame.com :" }
+      const back = STANDALONE ? "Retour au menu" : "Revenir au mode local"
+      const buttons: HudButton[] = [...officialButtons(s, this.host, "Rejouer sur traversalgame.com :"), { label: back, caption: "Ou bien :", onClick: () => this.host.send({ t: "officialLeave" }) }]
       this.hud.update({ turn: "", info: [], modal: { title, body, buttons } })
       return
     }
     body.push("Rejouer sur :")
-    this.hud.update({ turn: "", info: [], modal: { title, body, buttons: terrainButtons(s, this.net, state.mode) } })
+    this.hud.update({ turn: "", info: [], modal: { title, body, buttons: terrainButtons(s, this.host, state.mode) } })
   }
 }
 
@@ -257,22 +274,22 @@ class Playing extends Composite {
   }
 
   private showDrawOffer() {
-    this.chipContext.hud.update({ modal: drawOfferModal(this.chipContext.session, this.chipContext.net) })
+    this.chipContext.hud.update({ modal: drawOfferModal(this.chipContext.session, this.chipContext.host) })
   }
 }
 
 // ------------------------------------------------------------------ turn states
 
 /** On traversalgame.com the opponent can offer a draw */
-function drawOfferModal(session: Session, net: Net) {
+function drawOfferModal(session: Session, host: Host) {
   const from = session.official?.drawOffer
   if (!from) return null
   return {
     title: "Proposition de nulle",
     body: [`${from} propose une partie nulle.`],
     buttons: [
-      { label: "Accepter", active: true, onClick: () => net.send({ t: "officialDraw", accept: true }) },
-      { label: "Refuser", onClick: () => net.send({ t: "officialDraw", accept: false }) },
+      { label: "Accepter", active: true, onClick: () => host.send({ t: "officialDraw", accept: true }) },
+      { label: "Refuser", onClick: () => host.send({ t: "officialDraw", accept: false }) },
     ],
   }
 }
@@ -385,7 +402,7 @@ class Selected extends AppChip {
     const state = this.session.state!
     const la = actionFor(state, this.actions, pick)
     if (la) {
-      this.net.send({ t: "action", action: la.action })
+      this.host.send({ t: "action", action: la.action })
       this.terminate(new Signal("sending", { ply: state.ply }))
       return
     }
@@ -406,7 +423,7 @@ class Sending extends AppChip {
       if (this.state === "active" && this.session.state && this.session.state.ply !== ply)
         this.terminate(new Signal(this.session.myTurn ? "idle" : "waiting"))
     })
-    this._subscribe(this.net, "error", () => this.terminate(new Signal("idle")))
+    this._subscribe(this.host, "error", () => this.terminate(new Signal("idle")))
   }
 }
 

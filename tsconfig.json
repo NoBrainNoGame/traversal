@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "shared", "server"]
+  "include": ["src", "shared", "server", "relay"]
 }
