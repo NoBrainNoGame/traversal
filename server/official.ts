@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { WebSocket } from "ws"
-import { cellAt, goalRow, N, pieceScope, type Action, type GameState, type LegalAction, type Piece, type PieceType, type Seat } from "../shared/rules"
+import { cellAt, cellX, cellY, goalRow, inBoard, N, pieceScope, type Action, type GameState, type LegalAction, type Piece, type PieceType, type Seat } from "../shared/rules"
 import type { OfficialKind, OfficialStatus } from "../shared/protocol"
 
 const API = "https://api.traversalgame.com"
@@ -537,10 +537,40 @@ function lastMove(previous: GameState, next: GameState, record: MoveRecord, inde
   let action: Action
   if (offBoard(record.toRow)) action = { kind: "exit", pieceId, from: cellAt(record.toCol, goalRow(owner)) }
   else action = { kind: captured !== null ? "attack" : "move", pieceId, to: toCell(record.toRow, record.toCol), special: false }
-  const known = previous.official?.moves[pieceId]?.find((la) => actionKey(la.action) === actionKey(action))
   const from = toCell(record.fromRow, record.fromCol)
   const target = action.kind === "exit" ? action.from : action.to
-  return { action, path: known?.path ?? [from, target], captured }
+  // The official state only lists the moves of the side to play: for the other side, find a likely path ourselves.
+  // It may not be the one actually taken, it only has to look right in the animation
+  const key = actionKey(action)
+  const official = previous.official
+  const known = [official?.moves[pieceId], official?.scope[pieceId], pieceScope({ ...previous, official: undefined }, pieceId)]
+    .map((list) => list?.find((la) => actionKey(la.action) === key && la.path[0] === from))
+    .find(Boolean)
+  return { action, path: known?.path ?? walkPath(previous, from, target), captured }
+}
+
+/** Shortest walk between two squares, around the other pieces (the last resort for the animation) */
+function walkPath(state: GameState, from: number, to: number): number[] {
+  const blocked = new Set(state.pieces.filter((p) => p.status === "board").map((p) => p.cell))
+  const cameFrom = new Map<number, number>([[from, from]])
+  const queue = [from]
+  while (queue.length) {
+    const cell = queue.shift()!
+    if (cell === to) break
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = cellX(cell) + dx,
+        y = cellY(cell) + dy
+      if (!inBoard(x, y)) continue
+      const next = cellAt(x, y)
+      if (cameFrom.has(next) || (blocked.has(next) && next !== to)) continue
+      cameFrom.set(next, cell)
+      queue.push(next)
+    }
+  }
+  if (!cameFrom.has(to)) return [from, to]
+  const path = [to]
+  while (path[0] !== from) path.unshift(cameFrom.get(path[0])!)
+  return path
 }
 
 function describeEnd(reason: string, victory?: string | null) {
