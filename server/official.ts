@@ -34,7 +34,13 @@ const REASONS: Record<string, string> = {
 }
 const VICTORIES: Record<string, string> = { total_domination: "Domination totale", perfect_game: "Partie parfaite" }
 
-class OfficialError extends Error {}
+class OfficialError extends Error {
+  /** The fix is to log in on the site */
+  login = false
+}
+
+/** The Firefox session is missing or expired */
+const loginError = (message: string) => Object.assign(new OfficialError(message), { login: true })
 
 // ------------------------------------------------------------------ session cookies
 
@@ -132,7 +138,7 @@ async function api(path: string, method = "GET", body?: unknown) {
     jar.absorb(refresh)
     if (refresh.ok) res = await call()
   }
-  if (res.status === 401) throw new OfficialError("Session expirée : reconnecte-toi sur traversalgame.com dans Firefox, puis réessaie.")
+  if (res.status === 401) throw loginError("Session expirée : reconnecte-toi sur traversalgame.com dans Firefox, puis réessaie.")
   const text = await res.text()
   let data: any = null
   try {
@@ -200,7 +206,7 @@ export class OfficialGame {
 
   async start(kind: OfficialKind) {
     try {
-      if (!jar.loadFromFirefox()) throw new OfficialError("Aucune session traversalgame.com trouvée dans Firefox : connecte-toi sur le site avec Firefox.")
+      if (!jar.loadFromFirefox()) throw loginError("Aucune session traversalgame.com trouvée dans Firefox : connecte-toi sur le site avec Firefox, puis réessaie.")
       const me = await api("/me")
       if (!me.ok) throw new OfficialError(errorMessage(me.data, "Impossible de lire ton compte traversalgame.com."))
       const name = me.data?.username ?? "toi"
@@ -280,6 +286,21 @@ export class OfficialGame {
     this.send("respond_draw", { accept })
     this.status = { ...this.status, drawOffer: undefined }
     this.onChange()
+  }
+
+  /** True while a game is being played (it can't just be left: resign first) */
+  get live() {
+    return this.status.phase === "playing" && !!this.state && !this.state.over
+  }
+
+  offerDraw() {
+    if (!this.live) return
+    this.send("offer_draw", {})
+    this.onNotice("Nulle proposée à l'adversaire.")
+  }
+
+  resign() {
+    if (this.live) this.send("resign", {})
   }
 
   /** Sends one of the legal actions offered in the current state; returns an error message if it can't */
@@ -478,6 +499,10 @@ export class OfficialGame {
     const message = e instanceof OfficialError ? e.message : `Erreur de connexion au site officiel : ${(e as Error)?.message ?? e}`
     console.error("[officiel]", message)
     this.setStatus("error", message)
+    if (e instanceof OfficialError && e.login) {
+      this.status.login = `${SITE}/login`
+      this.onChange()
+    }
   }
 
   private stopPolling() {

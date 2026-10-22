@@ -1,6 +1,7 @@
 import * as THREE from "three"
 import { cellAt, cellX, cellY, goalRow, inBoard, N, type GameState, type LegalAction, type Seat } from "../shared/rules"
-import { makePiece, setPieceOpacity, type PieceView } from "./characters"
+import { makePiece, type PieceView } from "./characters"
+import { playMotion, resetPose, type Motion } from "./motion"
 import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP } from "./scenery"
 
 const FOG_COLOR = 0x1d232b
@@ -14,6 +15,22 @@ const OVERLAY = { transparent: true, depthWrite: false, polygonOffset: true, pol
 const CLICK_TOLERANCE_PX = 6
 const TILT_RANGE = [-0.45, 0.4]
 const ZOOM_RANGE = [9, 30]
+const DEFAULT_DISTANCE = 17.5
+const UP = new THREE.Vector3(0, 1, 0)
+/** Following an opponent's move: how close the camera gets, how long it waits on the piece before going back */
+const FOLLOW_DISTANCE = 10
+const FOLLOW_HOLD = 0.7
+/** The follow view looks at the piece three-quarters on: halfway between its side (the lower ground, so nothing hides it) and its front, from 30° up */
+const FOLLOW_AHEAD = THREE.MathUtils.degToRad(45)
+const FOLLOW_ELEVATION = THREE.MathUtils.degToRad(30)
+/** The camera aims a little above the ground (see applyView's lookAt): this puts the piece's body in the middle */
+const FOLLOW_LOOK_DROP = 0.2
+/** Seconds to close in on the piece, and to go back to the player's view */
+const FOLLOW_IN = 0.6
+const FOLLOW_OUT = 1
+/** How fast the shown view catches up with the wanted one (per second): every camera move is eased */
+const VIEW_DAMPING = 10
+const LAST_MOVE_COLOR = "255,165,58"
 /** Angle at which the camera looks down at the untilted board */
 const VIEW_ELEVATION = Math.atan2(0.69, 0.72)
 /** Where the stat badges sit around a piece's feet, in screen-aligned directions */
@@ -31,10 +48,14 @@ export interface ScopeMark {
 
 export type Pick = { kind: "piece"; pieceId: number } | { kind: "cell"; cell: number } | { kind: "exit"; cell: number } | { kind: "none" }
 
-interface PieceAnim {
-  points: THREE.Vector3[]
-  t: number
-  fadeOut: boolean
+/** The camera closing in on a piece the opponent moves; `weight` blends from the player's own view (0) to the piece (1) */
+interface Follow {
+  pieceId: number
+  target: THREE.Vector3
+  /** Board turn that puts the camera beside the piece */
+  yaw: number
+  weight: number
+  hold: number
 }
 
 export class Board3D extends EventTarget {
@@ -42,14 +63,27 @@ export class Board3D extends EventTarget {
   private scene = new THREE.Scene()
   /**
    * The camera and the lights never move: dragging tilts `pivot`, slides `pan` within the tilted board plane
-   * and spins `world` (the board and its pieces)
+   * and spins `world` (the board and its pieces).
+   * yaw, tilt, distance and userPan are the view the player chose; following an opponent's move only blends
+   * another view on top of it, so the camera always comes back to where the player left it
    */
   private pivot = new THREE.Group()
   private pan = new THREE.Group()
   private world = new THREE.Group()
   private yaw = 0
   private tilt = 0
-  private distance = 17.5
+  private distance = DEFAULT_DISTANCE
+  private userPan = new THREE.Vector3()
+  /** What is on screen: eases toward the wanted view every frame */
+  private shown = { yaw: 0, tilt: 0, distance: DEFAULT_DISTANCE, center: new THREE.Vector3() }
+  /** The shown view has reached the followed piece */
+  private focused = false
+  private follow: Follow | null = null
+  /** Which side this client plays (null: spectator), to tell the opponent's moves apart */
+  private viewer: Seat | null = null
+  private state: GameState | null = null
+  private lastMove = new THREE.Group()
+  private lastMoveTextures = new Map<boolean, THREE.CanvasTexture>()
   private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
   private raycaster = new THREE.Raycaster()
   private terrain = new THREE.Group()
@@ -61,7 +95,9 @@ export class Board3D extends EventTarget {
   private ground: THREE.Mesh | null = null
   private pieces = new Map<number, PieceView>()
   private exitMarkers: THREE.Mesh[] = []
-  private anims = new Map<number, PieceAnim>()
+  private anims = new Map<number, Motion>()
+  /** Pieces being killed: kept on the board until their killer's motion is done with them */
+  private dying = new Set<number>()
   private heights: number[] = []
   private selection = new THREE.Mesh(
     new THREE.RingGeometry(0.36, 0.46, 32).rotateX(-Math.PI / 2),
@@ -104,8 +140,8 @@ export class Board3D extends EventTarget {
     this.selection.visible = false
     this.hoverMesh.visible = false
     this.pathLine.renderOrder = 11
-    this.world.add(this.selection, this.hoverMesh, this.pathLine)
-    this.updateView()
+    this.world.add(this.selection, this.hoverMesh, this.pathLine, this.lastMove)
+    this.applyView(1)
 
     // Capture on the parent so a press that starts on the UI is never treated as a board drag
     eventTarget.parentElement!.addEventListener(
@@ -144,8 +180,9 @@ export class Board3D extends EventTarget {
       "wheel",
       (e) => {
         e.preventDefault()
+        if (this.isOverUi(e.clientX, e.clientY)) return
+        this.takeOver()
         this.distance = THREE.MathUtils.clamp(this.distance * Math.exp(e.deltaY * 0.001), ZOOM_RANGE[0], ZOOM_RANGE[1])
-        this.updateView()
       },
       { passive: false },
     )
@@ -153,6 +190,7 @@ export class Board3D extends EventTarget {
 
   /** Right drag spins and tilts the board, left drag slides it */
   private drag(button: number, dx: number, dy: number) {
+    this.takeOver()
     if (button === 2) {
       this.yaw += dx * 0.008
       this.tilt = THREE.MathUtils.clamp(this.tilt + dy * 0.004, TILT_RANGE[0], TILT_RANGE[1])
@@ -161,31 +199,111 @@ export class Board3D extends EventTarget {
       // Slide within the board plane so the camera keeps its height above the ground (the wheel handles that).
       // The ground is seen at a slant, so depth moves are stretched to follow the pointer
       const slant = Math.sin(VIEW_ELEVATION + this.tilt)
-      this.pan.position.x += dx * scale
-      this.pan.position.z += (dy * scale) / slant
+      this.userPan.x += dx * scale
+      this.userPan.z += (dy * scale) / slant
     }
-    this.updateView()
   }
 
-  private updateView() {
-    this.world.rotation.y = this.yaw
-    this.pivot.rotation.x = this.tilt
-    this.camera.position.set(0, this.distance * 0.69, this.distance * 0.72)
+  /** The view wanted right now: the player's own, blended toward the followed piece */
+  /** The view wanted right now: the player's own, blended toward the followed piece. `center` is the board point in the middle of the screen */
+  private wantedView() {
+    let { distance, yaw, tilt } = this
+    const center = this.userPan.clone().negate().applyAxisAngle(UP, -this.yaw)
+    const weight = this.follow ? THREE.MathUtils.smootherstep(this.follow.weight, 0, 1) : 0
+    if (weight > 0) {
+      // Turn the board to see the piece three-quarters on, lower the camera, zoom in, piece in the middle
+      yaw = THREE.MathUtils.lerp(yaw, this.follow!.yaw, weight)
+      tilt = THREE.MathUtils.lerp(tilt, FOLLOW_ELEVATION - VIEW_ELEVATION, weight)
+      // Its height counts too: from low down, a piece up on a hill would otherwise sit high on the screen
+      center.lerp(this.follow!.target.clone().setY(this.follow!.target.y - FOLLOW_LOOK_DROP), weight)
+      distance = THREE.MathUtils.lerp(distance, Math.min(distance, FOLLOW_DISTANCE), weight)
+    }
+    return { yaw, tilt, distance, center }
+  }
+
+  /** The slide that puts a board point in the middle of the screen, the board being turned by `yaw` */
+  private panFor(center: THREE.Vector3, yaw: number) {
+    return center.clone().applyAxisAngle(UP, yaw).negate()
+  }
+
+  /**
+   * The board turn that shows a move three-quarters on: from the side of its path where the ground is lower,
+   * turned halfway toward where the piece is heading
+   */
+  private sideYaw(path: number[]) {
+    const points = path.map((c) => this.cellTop(c))
+    const from = points[0],
+      to = points[points.length - 1]
+    const dir = new THREE.Vector3(to.x - from.x, 0, to.z - from.z)
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1)
+    dir.normalize()
+    const left = new THREE.Vector3(dir.z, 0, -dir.x)
+    const groundBeside = (side: THREE.Vector3) => points.reduce((sum, p) => sum + boardHeight(this.heights, p.x + side.x, p.z + side.z), 0)
+    const side = groundBeside(left) <= groundBeside(left.clone().negate()) ? left : left.negate()
+    const camera = side.multiplyScalar(Math.cos(FOLLOW_AHEAD)).addScaledVector(dir, Math.sin(FOLLOW_AHEAD))
+    // The board turn that brings this direction toward the camera, the short way round from the player's view
+    const yaw = Math.atan2(-camera.x, camera.z)
+    return this.yaw + THREE.MathUtils.euclideanModulo(yaw - this.yaw + Math.PI, Math.PI * 2) - Math.PI
+  }
+
+  /** Eases the shown view toward the wanted one; `ease` 1 jumps straight there */
+  private applyView(ease: number) {
+    const wanted = this.wantedView()
+    const shown = this.shown
+    shown.yaw += (wanted.yaw - shown.yaw) * ease
+    shown.tilt += (wanted.tilt - shown.tilt) * ease
+    shown.distance += (wanted.distance - shown.distance) * ease
+    // Easing the screen's centre point (not the slide) keeps the piece in the middle while the board turns
+    shown.center.lerp(wanted.center, ease)
+    this.focused =
+      !!this.follow &&
+      this.follow.weight >= 1 &&
+      shown.center.distanceTo(wanted.center) < 0.05 &&
+      Math.abs(wanted.distance - shown.distance) < 0.05 &&
+      Math.abs(wanted.yaw - shown.yaw) < 0.02 &&
+      Math.abs(wanted.tilt - shown.tilt) < 0.02
+    this.world.rotation.y = shown.yaw
+    this.pivot.rotation.x = shown.tilt
+    this.pan.position.copy(this.panFor(shown.center, shown.yaw))
+    this.camera.position.set(0, shown.distance * 0.69, shown.distance * 0.72)
     this.camera.lookAt(0, 0.5, 0)
     // The haze starts just past the board, whatever the zoom
     const fog = this.scene.fog as THREE.Fog
-    fog.near = this.distance - 2
-    fog.far = this.distance + 14
+    fog.near = shown.distance - 2
+    fog.far = shown.distance + 14
+  }
+
+  /** The player moves the camera during a follow: keep the followed view as their own and stop following */
+  private takeOver() {
+    if (!this.follow) return
+    const wanted = this.wantedView()
+    this.userPan.copy(this.panFor(wanted.center, wanted.yaw))
+    this.distance = wanted.distance
+    this.yaw = wanted.yaw
+    this.tilt = wanted.tilt
+    this.follow = null
   }
 
   /** Turns the board so the given player's starting row faces the camera */
   setSeatView(seat: Seat) {
     if (this.seatView === seat) return
     this.seatView = seat
-    this.yaw = seat === 0 ? Math.PI : 0
+    this.resetView()
+  }
+
+  /** Back to the starting view: the player's side facing the camera, not panned, tilted or zoomed */
+  resetView() {
+    this.follow = null
+    this.yaw = this.seatView === 0 ? Math.PI : 0
     this.tilt = 0
-    this.pan.position.set(0, 0, 0)
-    this.updateView()
+    this.distance = DEFAULT_DISTANCE
+    this.userPan.set(0, 0, 0)
+  }
+
+  /** Which side this client plays: the camera follows and the board marks the other side's moves */
+  setViewer(seat: Seat | null) {
+    this.viewer = seat
+    if (this.state) this.showLastMove(this.state)
   }
 
   resize(width: number, height: number) {
@@ -282,15 +400,34 @@ export class Board3D extends EventTarget {
     return geo
   }
 
-  /** Syncs the scene with a new game state; animates the last action if it's new */
+  /** Syncs the scene with a new game state; animates the last action if it's new (and follows it if it's the opponent's) */
   setState(state: GameState, animate: boolean) {
+    this.state = state
     if (state.heights.join() !== this.heights.join()) {
       this.buildTerrain(state.heights)
       for (const view of this.pieces.values()) this.world.remove(view.holder)
       this.pieces.clear()
       this.anims.clear()
+      this.dying.clear()
       animate = false
     }
+    const last = state.last
+    const followed = animate && last && this.isOpponents(state, last.action.pieceId) ? last.action.pieceId : null
+    if (followed !== null) {
+      const view = this.pieces.get(followed)
+      // Moves in a row keep the camera where it already is
+      this.follow = {
+        pieceId: followed,
+        target: view ? view.holder.position.clone() : new THREE.Vector3(),
+        yaw: this.sideYaw(last!.path),
+        weight: this.follow?.weight ?? 0,
+        hold: FOLLOW_HOLD,
+      }
+    }
+    const waitForCamera = followed !== null
+    // Kept until the attacker is done with it, wherever it comes in the loop below
+    const victim = animate && last?.captured != null ? last.captured : null
+    if (victim !== null && this.pieces.has(victim)) this.dying.add(victim)
 
     for (const piece of state.pieces) {
       let view = this.pieces.get(piece.id)
@@ -302,7 +439,6 @@ export class Board3D extends EventTarget {
         this.pieces.set(piece.id, view)
       }
       const mesh = view.holder
-      const last = state.last
       if (animate && last && last.action.pieceId === piece.id) {
         const points = last.path.map((c) => this.cellTop(c))
         if (last.action.kind === "exit") {
@@ -310,16 +446,89 @@ export class Board3D extends EventTarget {
           off.z += piece.owner === 0 ? 1.2 : -1.2
           points.push(off)
         }
-        this.anims.set(piece.id, { points, t: 0, fadeOut: piece.status === "finished" })
-      } else if (animate && last?.captured === piece.id) {
-        this.anims.set(piece.id, { points: [mesh.position.clone(), mesh.position.clone().setY(mesh.position.y - 0.6)], t: 0, fadeOut: true })
+        this.finishMotion(piece.id)
+        const victimView = victim !== null ? this.pieces.get(victim) : undefined
+        this.anims.set(piece.id, {
+          view,
+          points,
+          attack: last.action.kind === "attack",
+          victim: victimView ? { id: victim!, view: victimView } : null,
+          fadeOut: piece.status === "finished",
+          waitForCamera,
+          time: 0,
+        })
       } else if (piece.status === "board") {
-        mesh.position.copy(this.cellTop(piece.cell))
-      } else if (!this.anims.has(piece.id)) {
+        if (!this.anims.has(piece.id)) mesh.position.copy(this.cellTop(piece.cell))
+      } else if (!this.anims.has(piece.id) && !this.dying.has(piece.id)) {
         this.world.remove(mesh)
         this.pieces.delete(piece.id)
       }
     }
+    this.showLastMove(state)
+  }
+
+  /** Ends a piece's motion where it stands: back to rest, the dead and the departed removed */
+  private finishMotion(id: number) {
+    const motion = this.anims.get(id)
+    if (!motion) return
+    this.anims.delete(id)
+    resetPose(motion.view)
+    if (motion.fadeOut) this.removePiece(id)
+    if (motion.victim) {
+      this.dying.delete(motion.victim.id)
+      this.removePiece(motion.victim.id)
+    }
+  }
+
+  private removePiece(id: number) {
+    const view = this.pieces.get(id)
+    if (view) this.world.remove(view.holder)
+    this.pieces.delete(id)
+  }
+
+  private isOpponents(state: GameState, pieceId: number) {
+    return state.pieces[pieceId].owner !== this.viewer
+  }
+
+  /** Marks the opponent's last move: the square it left, and a frame around where the piece now stands */
+  private showLastMove(state: GameState) {
+    this.lastMove.clear()
+    const last = state.last
+    if (!last || !this.isOpponents(state, last.action.pieceId)) return
+    const tile = (cell: number, filled: boolean) =>
+      new THREE.Mesh(this.drape(cell, 0.96, DRAPE_LIFT - 0.01), new THREE.MeshBasicMaterial({ map: this.lastMoveTexture(filled), ...OVERLAY }))
+    this.lastMove.add(tile(last.path[0], true))
+    const piece = state.pieces[last.action.pieceId]
+    if (piece.status === "board") {
+      const frame = tile(piece.cell, false)
+      // Shown once the piece gets there
+      frame.userData.waitFor = piece.id
+      frame.visible = !this.anims.has(piece.id)
+      this.lastMove.add(frame)
+    }
+  }
+
+  private lastMoveTexture(filled: boolean) {
+    let texture = this.lastMoveTextures.get(filled)
+    if (texture) return texture
+    const size = 128
+    const canvas = document.createElement("canvas")
+    canvas.width = canvas.height = size
+    const ctx = canvas.getContext("2d")!
+    if (filled) {
+      ctx.fillStyle = `rgba(${LAST_MOVE_COLOR},0.3)`
+      ctx.fillRect(0, 0, size, size)
+    }
+    ctx.strokeStyle = `rgba(${LAST_MOVE_COLOR},0.9)`
+    ctx.lineWidth = 9
+    ctx.beginPath()
+    ctx.roundRect(8, 8, size - 16, size - 16, 14)
+    ctx.stroke()
+    texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy()
+    this.lastMoveTextures.set(filled, texture)
+    return texture
   }
 
   /** Shows the selected piece's options: green moves, red attacks, gold exits */
@@ -440,29 +649,19 @@ export class Board3D extends EventTarget {
     const dt = Math.min((now - this.lastTime) / 1000, 0.1)
     this.lastTime = now
 
-    for (const [id, anim] of this.anims) {
-      const view = this.pieces.get(id)!
-      const mesh = view.holder
-      const segments = anim.points.length - 1
-      anim.t = Math.min(anim.t + dt * 5, segments)
-      const i = Math.min(Math.floor(anim.t), segments - 1)
-      const f = anim.t - i
-      const a = anim.points[i],
-        b = anim.points[i + 1]
-      mesh.position.lerpVectors(a, b, f)
-      // Hop over each square, higher when climbing or dropping
-      mesh.position.y += Math.sin(f * Math.PI) * (0.25 + Math.abs(b.y - a.y) * 0.6)
-      // Face the way it walks
-      if (Math.abs(b.x - a.x) + Math.abs(b.z - a.z) > 0.01) view.model.rotation.y = Math.atan2(b.x - a.x, b.z - a.z)
-      if (anim.fadeOut) setPieceOpacity(view, 1 - anim.t / segments)
-      if (anim.t >= segments) {
-        this.anims.delete(id)
-        if (anim.fadeOut) {
-          this.world.remove(mesh)
-          this.pieces.delete(id)
-        }
+    const ground = (x: number, z: number) => boardHeight(this.heights, x, z)
+    for (const [id, motion] of this.anims) {
+      if (motion.waitForCamera) {
+        if (this.follow && !this.focused) continue
+        motion.waitForCamera = false
       }
+      motion.time += dt
+      if (playMotion(motion, ground)) this.finishMotion(id)
     }
+
+    for (const tile of this.lastMove.children) if (tile.userData.waitFor !== undefined) tile.visible = !this.anims.has(tile.userData.waitFor)
+    if (this.follow) this.updateFollow(dt)
+    this.applyView(1 - Math.exp(-dt * VIEW_DAMPING))
 
     // Badges stay at the screen-left (movement) and screen-right (strength) of each piece's feet, whatever the board's rotation
     this.world.updateMatrixWorld()
@@ -482,5 +681,19 @@ export class Board3D extends EventTarget {
     this.selection.material.opacity = 0.7 + Math.sin(now / 200) * 0.25
     this.scenery.update(now / 1000)
     this.renderer.render(this.scene, this.camera)
+  }
+
+  /** Closes in while the piece moves, lingers a moment, then eases back to the player's view */
+  private updateFollow(dt: number) {
+    const follow = this.follow!
+    const view = this.pieces.get(follow.pieceId)
+    if (view) follow.target.copy(view.holder.position)
+    if (this.anims.has(follow.pieceId) || follow.hold > 0) {
+      follow.weight = Math.min(1, follow.weight + dt / FOLLOW_IN)
+      if (!this.anims.has(follow.pieceId)) follow.hold -= dt
+    } else {
+      follow.weight -= dt / FOLLOW_OUT
+      if (follow.weight <= 0) this.follow = null
+    }
   }
 }

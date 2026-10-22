@@ -4,16 +4,22 @@ export interface HudButton {
   label: string
   onClick: () => void
   active?: boolean
+  /** Red, for actions that can't be undone */
+  danger?: boolean
   /** Starts a new row of buttons under this caption */
   caption?: string
 }
+
+export type HudModal = { title: string; body: string[]; buttons: HudButton[] }
 
 export interface HudModel {
   status: { color: number; label: string }[]
   turn: string
   right: string[]
   info: string[]
-  modal: { title: string; body: string[]; buttons: HudButton[] } | null
+  modal: HudModal | null
+  /** The pause menu, drawn over everything else with the board dimmed */
+  pause: HudModal | null
   toast: string | null
 }
 
@@ -25,7 +31,7 @@ const text = (value: string, style: TextStyleOptions = {}) =>
 /** 2D overlay drawn with Pixi on top of the Three.js board */
 export class Hud {
   readonly app = new Application()
-  private model: HudModel = { status: [], turn: "", right: [], info: [], modal: null, toast: null }
+  private model: HudModel = { status: [], turn: "", right: [], info: [], modal: null, pause: null, toast: null }
   private toastTimer = 0
 
   async init(canvas: HTMLCanvasElement) {
@@ -111,10 +117,16 @@ export class Hud {
       stage.addChild(box)
     }
 
-    if (m.modal) this.drawModal(m.modal, W, H)
+    if (m.pause) {
+      // The backdrop also keeps the board from reacting under the menu
+      const backdrop = new Graphics().rect(0, 0, W, H).fill({ color: 0x000000, alpha: 0.45 })
+      backdrop.eventMode = "static"
+      stage.addChild(backdrop)
+      this.drawModal(m.pause, "pause", W, H)
+    } else if (m.modal) this.drawModal(m.modal, "modal", W, H)
   }
 
-  private drawModal(modal: NonNullable<HudModel["modal"]>, W: number, H: number) {
+  private drawModal(modal: HudModal, key: "modal" | "pause", W: number, H: number) {
     const width = Math.min(460, W - 32)
     const box = new Container()
     const title = text(modal.title, { fontSize: 24, fontWeight: "700" })
@@ -138,7 +150,7 @@ export class Hud {
         y += caption.height + 8
         bx = 24
       }
-      const label = text(b.label, { fontWeight: "600", fill: b.active ? 0x15171c : 0xe8eaf0 })
+      const label = text(b.label, { fontWeight: "600", fill: b.active && !b.danger ? 0x15171c : 0xe8eaf0 })
       const bw = label.width + 28,
         bh = 36
       if (bx + bw > width - 24) {
@@ -146,7 +158,7 @@ export class Hud {
         y += bh + 10
       }
       const btn = new Container()
-      const bg = new Graphics().roundRect(0, 0, bw, bh, 8).fill(b.active ? 0xffe066 : 0x2b3040)
+      const bg = new Graphics().roundRect(0, 0, bw, bh, 8).fill(b.danger ? 0xb83232 : b.active ? 0xffe066 : 0x2b3040)
       label.position.set(14, (bh - label.height) / 2)
       btn.addChild(bg, label)
       btn.position.set(bx, y)
@@ -154,7 +166,7 @@ export class Hud {
       btn.cursor = "pointer"
       btn.on("pointerover", () => (bg.tint = 0xdddddd))
       btn.on("pointerout", () => (bg.tint = 0xffffff))
-      btn.on("pointertap", () => this.model.modal?.buttons[i]?.onClick())
+      btn.on("pointertap", () => this.model[key]?.buttons[i]?.onClick())
       box.addChild(btn)
       bx += bw + 10
     })

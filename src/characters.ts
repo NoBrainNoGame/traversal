@@ -54,21 +54,58 @@ function limb(parent: THREE.Object3D, a: V3, b: V3, r0: number, r1: number, mate
 
 const sphere = (r: number) => new THREE.SphereGeometry(r, 10, 8)
 
-function buildExplorer(m: Materials) {
+/** A joint: parts added to it are placed relative to `at` and turn around it */
+function joint(parent: THREE.Object3D, at: V3) {
+  const group = new THREE.Group()
+  group.position.set(...at)
+  group.userData.home = group.position.clone()
+  parent.add(group)
+  return group
+}
+
+/** The moving parts the animations drive (see motion.ts); each piece type has its own */
+export interface Parts {
+  /** Goat legs, turning at the hip */
+  frontLegs?: THREE.Group[]
+  backLegs?: THREE.Group[]
+  /** Goat neck and head, turning at the base of the neck (lowered to charge) */
+  head?: THREE.Group
+  /** Soldier legs, turning at the hip */
+  legs?: THREE.Group[]
+  /** The spear, turning in the hand */
+  spear?: THREE.Group
+  /** The brute standing, and curled up into a spiked ball */
+  body?: THREE.Group
+  ball?: THREE.Group
+  /** Spins inside `ball` as it rolls */
+  ballSpin?: THREE.Group
+}
+
+/** Radius of the sentinel's rolling ball */
+export const BALL_RADIUS = 0.21
+
+type Built = { model: THREE.Group; parts: Parts }
+
+function buildExplorer(m: Materials): Built {
   const model = new THREE.Group()
+  const frontLegs: THREE.Group[] = [],
+    backLegs: THREE.Group[] = []
   // The goat
   add(model, new THREE.CapsuleGeometry(0.095, 0.2, 4, 8).rotateX(Math.PI / 2), m.fur, [0, 0.27, 0])
   for (const sx of [-0.06, 0.06])
     for (const sz of [-0.11, 0.11]) {
-      limb(model, [sx, 0.26, sz], [sx, 0.03, sz + 0.01], 0.026, 0.02, m.fur)
-      add(model, sphere(0.024), m.dark, [sx, 0.02, sz + 0.01], [0, 0, 0], [1, 0.6, 1.2])
+      const leg = joint(model, [sx, 0.26, sz])
+      limb(leg, [0, 0, 0], [0, -0.23, 0.01], 0.026, 0.02, m.fur)
+      add(leg, sphere(0.024), m.dark, [0, -0.24, 0.01], [0, 0, 0], [1, 0.6, 1.2])
+      ;(sz > 0 ? frontLegs : backLegs).push(leg)
     }
-  limb(model, [0, 0.3, 0.12], [0, 0.43, 0.2], 0.05, 0.038, m.fur)
-  add(model, new THREE.CapsuleGeometry(0.042, 0.07, 4, 8).rotateX(Math.PI / 2), m.fur, [0, 0.45, 0.25], [0.55, 0, 0])
-  add(model, new THREE.ConeGeometry(0.02, 0.06, 5), m.fur, [0, 0.37, 0.29], [Math.PI, 0, 0])
+  const head = joint(model, [0, 0.3, 0.12])
+  limb(head, [0, 0, 0], [0, 0.13, 0.08], 0.05, 0.038, m.fur)
+  add(head, new THREE.CapsuleGeometry(0.042, 0.07, 4, 8).rotateX(Math.PI / 2), m.fur, [0, 0.15, 0.13], [0.55, 0, 0])
+  add(head, new THREE.ConeGeometry(0.02, 0.06, 5), m.fur, [0, 0.07, 0.17], [Math.PI, 0, 0])
   for (const s of [-1, 1]) {
-    add(model, new THREE.TorusGeometry(0.045, 0.012, 5, 10, Math.PI * 1.15), m.horn, [s * 0.028, 0.5, 0.21], [0, Math.PI / 2, 0.2])
-    add(model, new THREE.BoxGeometry(0.05, 0.015, 0.025), m.fur, [s * 0.05, 0.47, 0.22], [0, 0, s * -0.4])
+    add(head, new THREE.TorusGeometry(0.045, 0.012, 5, 10, Math.PI * 1.15), m.horn, [s * 0.028, 0.2, 0.09], [0, Math.PI / 2, 0.2])
+    add(head, new THREE.BoxGeometry(0.05, 0.015, 0.025), m.fur, [s * 0.05, 0.17, 0.1], [0, 0, s * -0.4])
   }
   add(model, new THREE.ConeGeometry(0.02, 0.06, 5), m.fur, [0, 0.33, -0.17], [-0.8, 0, 0])
   add(model, new THREE.BoxGeometry(0.17, 0.03, 0.14), m.team, [0, 0.36, -0.01])
@@ -93,15 +130,17 @@ function buildExplorer(m: Materials) {
   add(flag, cloth, m.flag, [0, 0, 0])
   model.add(flag)
   model.userData.animate = (t: number) => (flag.rotation.y = Math.PI / 2 + Math.sin(t * 3) * 0.25)
-  return model
+  return { model, parts: { frontLegs, backLegs, head } }
 }
 
-function buildVanguard(m: Materials) {
+function buildVanguard(m: Materials): Built {
   const model = new THREE.Group()
-  for (const s of [-1, 1]) {
-    limb(model, [s * 0.05, 0.23, 0], [s * 0.06, 0.04, 0.01], 0.034, 0.03, m.leather)
-    add(model, sphere(0.04), m.dark, [s * 0.06, 0.03, 0.02], [0, 0, 0], [1, 0.6, 1.4])
-  }
+  const legs = [-1, 1].map((s) => {
+    const leg = joint(model, [s * 0.05, 0.23, 0])
+    limb(leg, [0, 0, 0], [s * 0.01, -0.19, 0.01], 0.034, 0.03, m.leather)
+    add(leg, sphere(0.04), m.dark, [s * 0.01, -0.2, 0.02], [0, 0, 0], [1, 0.6, 1.4])
+    return leg
+  })
   add(model, new THREE.CylinderGeometry(0.085, 0.11, 0.1, 8), m.team, [0, 0.25, 0])
   add(model, new THREE.CylinderGeometry(0.1, 0.088, 0.14, 8), m.metal, [0, 0.37, 0])
   add(model, new THREE.CylinderGeometry(0.09, 0.09, 0.025, 8), m.leather, [0, 0.305, 0])
@@ -114,43 +153,58 @@ function buildVanguard(m: Materials) {
   limb(model, [-0.1, 0.42, 0], [-0.13, 0.33, 0.05], 0.025, 0.022, m.team)
   limb(model, [-0.13, 0.33, 0.05], [-0.12, 0.31, 0.11], 0.022, 0.02, m.skin)
   limb(model, [0.1, 0.42, 0], [0.13, 0.34, 0.07], 0.025, 0.022, m.team)
-  const spear = limb(model, [-0.12, 0.05, -0.18], [-0.12, 0.78, 0.33], 0.011, 0.011, m.wood)
-  const tip = add(model, new THREE.ConeGeometry(0.025, 0.09, 5), m.metal, [0, 0, 0])
+  // The spear turns around the point where the hand holds it
+  const grip = joint(model, [-0.12, 0.31, 0])
+  const spear = limb(grip, [0, -0.26, -0.18], [0, 0.47, 0.33], 0.011, 0.011, m.wood)
+  const tip = add(grip, new THREE.ConeGeometry(0.025, 0.09, 5), m.metal, [0, 0, 0])
   tip.quaternion.copy(spear.quaternion)
-  tip.position.set(-0.12, 0.78, 0.33).add(new THREE.Vector3(0, 0.045, 0).applyQuaternion(spear.quaternion))
+  tip.position.set(0, 0.47, 0.33).add(new THREE.Vector3(0, 0.045, 0).applyQuaternion(spear.quaternion))
   add(model, new THREE.CylinderGeometry(0.13, 0.13, 0.025, 14).rotateX(Math.PI / 2), m.team, [0.16, 0.34, 0.11], [0, 0.45, 0])
   add(model, new THREE.TorusGeometry(0.13, 0.012, 5, 20), m.metal, [0.16, 0.34, 0.11], [0, 0.45, 0])
   add(model, sphere(0.03), m.metal, [0.165, 0.34, 0.125])
-  return model
+  return { model, parts: { legs, spear: grip } }
 }
 
-function buildSentinel(m: Materials) {
+function buildSentinel(m: Materials): Built {
   const model = new THREE.Group()
+  const body = joint(model, [0, 0, 0])
   for (const s of [-1, 1]) {
-    limb(model, [s * 0.09, 0.22, 0], [s * 0.11, 0.04, 0.02], 0.065, 0.055, m.leather)
-    add(model, sphere(0.06), m.dark, [s * 0.11, 0.03, 0.04], [0, 0, 0], [1.1, 0.6, 1.4])
+    limb(body, [s * 0.09, 0.22, 0], [s * 0.11, 0.04, 0.02], 0.065, 0.055, m.leather)
+    add(body, sphere(0.06), m.dark, [s * 0.11, 0.03, 0.04], [0, 0, 0], [1.1, 0.6, 1.4])
   }
-  add(model, new THREE.CylinderGeometry(0.17, 0.16, 0.09, 9), m.team, [0, 0.23, 0])
-  add(model, new THREE.BoxGeometry(0.06, 0.045, 0.02), m.metal, [0, 0.24, 0.16])
+  add(body, new THREE.CylinderGeometry(0.17, 0.16, 0.09, 9), m.team, [0, 0.23, 0])
+  add(body, new THREE.BoxGeometry(0.06, 0.045, 0.02), m.metal, [0, 0.24, 0.16])
   // Barrel chest, huge shoulders, arms hanging down to big fists
-  add(model, sphere(0.19), m.skin, [0, 0.4, 0], [0, 0, 0], [1.25, 1, 0.9])
+  add(body, sphere(0.19), m.skin, [0, 0.4, 0], [0, 0, 0], [1.25, 1, 0.9])
   for (const s of [-1, 1]) {
-    add(model, sphere(0.08), m.skin, [s * 0.075, 0.46, 0.12], [0, 0, 0], [1, 0.7, 0.6])
-    add(model, new THREE.SphereGeometry(0.1, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), m.team, [s * 0.21, 0.51, 0], [0, 0, s * -0.35])
-    add(model, new THREE.ConeGeometry(0.02, 0.06, 5), m.metal, [s * 0.25, 0.6, 0], [0, 0, s * -0.5])
-    limb(model, [s * 0.22, 0.5, 0], [s * 0.28, 0.33, 0.04], 0.075, 0.065, m.skin)
-    limb(model, [s * 0.28, 0.33, 0.04], [s * 0.27, 0.16, 0.1], 0.065, 0.08, m.skin)
-    add(model, new THREE.CylinderGeometry(0.075, 0.075, 0.06, 8), m.leather, [s * 0.275, 0.22, 0.08], [0.35, 0, 0])
-    add(model, sphere(0.075), m.skin, [s * 0.27, 0.13, 0.11])
+    add(body, sphere(0.08), m.skin, [s * 0.075, 0.46, 0.12], [0, 0, 0], [1, 0.7, 0.6])
+    add(body, new THREE.SphereGeometry(0.1, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), m.team, [s * 0.21, 0.51, 0], [0, 0, s * -0.35])
+    add(body, new THREE.ConeGeometry(0.02, 0.06, 5), m.metal, [s * 0.25, 0.6, 0], [0, 0, s * -0.5])
+    limb(body, [s * 0.22, 0.5, 0], [s * 0.28, 0.33, 0.04], 0.075, 0.065, m.skin)
+    limb(body, [s * 0.28, 0.33, 0.04], [s * 0.27, 0.16, 0.1], 0.065, 0.08, m.skin)
+    add(body, new THREE.CylinderGeometry(0.075, 0.075, 0.06, 8), m.leather, [s * 0.275, 0.22, 0.08], [0.35, 0, 0])
+    add(body, sphere(0.075), m.skin, [s * 0.27, 0.13, 0.11])
   }
-  add(model, sphere(0.07), m.skin, [0, 0.59, 0.07])
-  add(model, new THREE.TorusGeometry(0.066, 0.014, 5, 14), m.team, [0, 0.62, 0.07], [Math.PI / 2, 0, 0])
-  for (const s of [-1, 1]) add(model, sphere(0.011), m.dark, [s * 0.025, 0.6, 0.135])
-  add(model, new THREE.BoxGeometry(0.07, 0.012, 0.02), m.dark, [0, 0.615, 0.128])
-  return model
+  add(body, sphere(0.07), m.skin, [0, 0.59, 0.07])
+  add(body, new THREE.TorusGeometry(0.066, 0.014, 5, 14), m.team, [0, 0.62, 0.07], [Math.PI / 2, 0, 0])
+  for (const s of [-1, 1]) add(body, sphere(0.011), m.dark, [s * 0.025, 0.6, 0.135])
+  add(body, new THREE.BoxGeometry(0.07, 0.012, 0.02), m.dark, [0, 0.615, 0.128])
+  // Curled up: a spiked ball in the team colour, for rolling and crushing
+  const ball = joint(model, [0, BALL_RADIUS, 0])
+  ball.visible = false
+  const ballSpin = joint(ball, [0, 0, 0])
+  add(ballSpin, new THREE.IcosahedronGeometry(BALL_RADIUS, 1), m.team, [0, 0, 0])
+  add(ballSpin, new THREE.TorusGeometry(BALL_RADIUS * 0.98, 0.022, 5, 18), m.skin, [0, 0, 0], [0, Math.PI / 2, 0])
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2
+    const dir = new THREE.Vector3(0.35 * (i % 2 ? 1 : -1), Math.cos(a), Math.sin(a)).normalize()
+    const quill = add(ballSpin, new THREE.ConeGeometry(0.05, 0.14, 5), m.teamDark, dir.clone().multiplyScalar(BALL_RADIUS + 0.04).toArray() as V3)
+    quill.quaternion.setFromUnitVectors(UP, dir)
+  }
+  return { model, parts: { body, ball, ballSpin } }
 }
 
-const BUILDERS: Record<PieceType, (m: Materials) => THREE.Group> = {
+const BUILDERS: Record<PieceType, (m: Materials) => Built> = {
   explorer: buildExplorer,
   vanguard: buildVanguard,
   sentinel: buildSentinel,
@@ -234,6 +288,8 @@ export interface PieceView {
   holder: THREE.Group
   /** Turns to face where it walks; the holder itself never rotates, so the badges stay put */
   model: THREE.Group
+  parts: Parts
+  type: PieceType
   badges: { move: THREE.Sprite; strength: THREE.Sprite }
 }
 
@@ -241,7 +297,9 @@ export function makePiece(type: PieceType, seat: Seat, id: number): PieceView {
   const materials = makeMaterials(seat)
   const holder = new THREE.Group()
   holder.userData.pieceId = id
-  const model = BUILDERS[type](materials)
+  const { model, parts } = BUILDERS[type](materials)
+  // Turn first, then lean: the animations pitch the model forward and back along where it faces
+  model.rotation.order = "YXZ"
   model.rotation.y = seat === 0 ? 0 : Math.PI
   // Team-coloured base so ownership reads at a glance
   const base = new THREE.Mesh(
@@ -253,7 +311,7 @@ export function makePiece(type: PieceType, seat: Seat, id: number): PieceView {
   const def = PIECES[type]
   const badges = { move: badge(def.move, "move"), strength: badge(def.strength, "strength") }
   holder.add(base, model, badges.move, badges.strength)
-  return { holder, model, badges }
+  return { holder, model, parts, type, badges }
 }
 
 export function setPieceOpacity(view: PieceView, opacity: number) {

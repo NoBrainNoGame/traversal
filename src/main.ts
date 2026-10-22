@@ -3,9 +3,12 @@ import { Functional, Parallel, Runner } from "@ghom/booyah"
 import type { ServerMessage } from "../shared/protocol"
 import type { GameState } from "../shared/rules"
 import { Board3D } from "./board3d"
+import { Chat } from "./chat"
 import { makeAppMachine, Session } from "./flow"
 import { Hud } from "./hud"
 import { Net } from "./net"
+import { PauseMenu } from "./pause"
+import { Webcam } from "./webcam"
 
 const boardCanvas = document.getElementById("board") as HTMLCanvasElement
 const hudCanvas = document.getElementById("hud") as HTMLCanvasElement
@@ -23,18 +26,29 @@ resize()
 
 const session = new Session()
 const net = new Net()
+const webcam = new Webcam(net)
+const chat = new Chat(net, () => session.paused)
+new PauseMenu(session, net, board, hud, webcam)
 const teamLabel = (seat: 0 | 1) => (seat === 0 ? "Rouge" : "Bleu")
 
 net.addEventListener("open", () => session.set({ online: true }))
-net.addEventListener("close", () => session.set({ online: false }))
+net.addEventListener("close", () => session.set({ online: false, paused: false }))
 net.addEventListener("welcome", (e) => {
   const msg = (e as CustomEvent<Extract<ServerMessage, { t: "welcome" }>>).detail
   board.setSeatView(msg.seat ?? 0)
-  session.set({ seat: msg.seat, urls: msg.urls })
+  board.setViewer(msg.seat)
+  session.set({ seat: msg.seat, urls: msg.urls, secureUrls: msg.secureUrls })
+  webcam.joined(msg.seat)
 })
+net.addEventListener("chat", (e) => {
+  const msg = (e as CustomEvent<Extract<ServerMessage, { t: "chat" }>>).detail
+  chat.add(msg.messages, msg.reset)
+})
+net.addEventListener("rtc", (e) => void webcam.onSignal((e as CustomEvent<Extract<ServerMessage, { t: "rtc" }>>).detail.signal))
 net.addEventListener("official", (e) => {
   const msg = (e as CustomEvent<Extract<ServerMessage, { t: "official" }>>).detail
   if (msg.seat !== session.seat) board.setSeatView(msg.seat ?? 0)
+  board.setViewer(msg.seat)
   session.set({ official: msg.status, seat: msg.seat })
 })
 net.addEventListener("lobby", (e) => {

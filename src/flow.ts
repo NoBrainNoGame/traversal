@@ -10,6 +10,10 @@ export class Session extends EventTarget {
   online = false
   seat: Seat | null = null
   urls: string[] = []
+  /** The same addresses over https: the friend needs them for the webcam */
+  secureUrls: string[] = []
+  /** The pause menu is open */
+  paused = false
   connected: [boolean, boolean] = [false, false]
   lobbyMode: TerrainMode = "balanced"
   state: GameState | null = null
@@ -41,7 +45,7 @@ function phaseOf(session: Session): Phase {
   return session.state.over ? "over" : "playing"
 }
 
-const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom"]
+const CONTROLS = ["Clic gauche glissé : déplacer · Clic droit : tourner · Molette : zoom", "Échap : menu · Entrée : discuter"]
 const SCOPE_LEGEND = "Vert : coût de déplacement · Rouge : bonus d'attaque (gris : attaque perdue)"
 
 function hoveredPiece(state: GameState, pick: Pick): number | undefined {
@@ -126,7 +130,7 @@ class Connecting extends PhaseChip {
   }
 }
 
-const OFFICIAL_KINDS: [OfficialKind, string][] = [
+export const OFFICIAL_KINDS: [OfficialKind, string][] = [
   ["bot", "Contre un bot"],
   ["match", "Matchmaking"],
   ["friend", "Inviter un ami"],
@@ -165,6 +169,7 @@ class Lobby extends PhaseChip {
         : [
             "En attente de ton ami…",
             s.urls.length ? `Il doit ouvrir : ${s.urls.join("  ou  ")}` : "Aucune adresse réseau trouvée sur cette machine.",
+            ...(s.secureUrls.length ? [`Avec webcam : ${s.secureUrls.join("  ou  ")} (accepter l'avertissement du certificat)`] : []),
             "",
             "Partie locale, terrain :",
           ]
@@ -197,6 +202,10 @@ class Official extends PhaseChip {
         leave("Annuler"),
       ]
     else if (status.phase === "error") buttons = [leave("Retour")]
+    if (status.login) {
+      const url = status.login
+      buttons.unshift({ label: "Se connecter sur traversalgame.com", active: true, onClick: () => void window.open(url, "_blank", "noopener") })
+    }
     if (status.link) buttons.unshift({ label: "Copier le lien", active: true, onClick: () => void navigator.clipboard?.writeText(status.link!) })
     this.hud.update({ turn: "", info: [], modal: { title: "traversalgame.com", body, buttons } })
   }
@@ -331,8 +340,11 @@ class Selected extends AppChip {
     this.computeActions()
     this._subscribe(this.board, "pick", (e: CustomEvent<Pick>) => this.onPick(e.detail))
     this._subscribe(this.board, "hover", (e: CustomEvent<Pick>) => this.onHover(e.detail))
-    this._subscribe(window, "keydown", (e: KeyboardEvent) => {
-      if (e.key === "Escape") this.terminate(new Signal("idle"))
+    // On the document, so this runs before the pause menu's listener and keeps Escape from also opening it
+    this._subscribe(document, "keydown", (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || this.session.paused) return
+      e.preventDefault()
+      this.terminate(new Signal("idle"))
     })
     this._subscribe(this.session, "change", () => {
       if (this.state !== "active") return
