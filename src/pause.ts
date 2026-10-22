@@ -3,6 +3,7 @@ import type { Board3D } from "./board3d"
 import { accountLine, OFFICIAL_KINDS, type Session } from "./flow"
 import { STANDALONE, type Host } from "./host"
 import type { Hud, HudButton } from "./hud"
+import type { Sound } from "./sound"
 import type { Webcam } from "./webcam"
 
 /** Gives the first button of a row its caption */
@@ -21,11 +22,13 @@ export class PauseMenu {
     private host: Host,
     private board: Board3D,
     private hud: Hud,
+    private sound: Sound,
     /** Only with a local host */
     private webcam: Webcam | null,
   ) {
     session.addEventListener("change", () => this.render())
     webcam?.addEventListener("change", () => this.render())
+    sound.addEventListener("change", () => this.render())
     // Listeners nearer the page (a selected piece) take Escape first and mark it handled
     addEventListener("keydown", (e) => {
       if (e.key === "Escape" && !e.defaultPrevented) this.toggle()
@@ -83,7 +86,10 @@ export class PauseMenu {
       }
     }
 
-    const view: HudButton[] = [{ label: "Recentrer la vue", onClick: run(() => this.board.resetView()) }]
+    const view: HudButton[] = [
+      { label: "Recentrer la vue", onClick: run(() => this.board.resetView()) },
+      { label: this.sound.muted ? "Activer le son" : "Couper le son", onClick: () => this.sound.toggleMute() },
+    ]
     // The webcam is for games between friends on this host, not on the site
     const webcam = this.webcam
     if (webcam && seat !== null && (!official || webcam.on)) {

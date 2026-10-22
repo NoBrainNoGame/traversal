@@ -1,5 +1,6 @@
 import * as THREE from "three"
 import { BALL_RADIUS, setPieceOpacity, type PieceView } from "./characters"
+import type { Cue } from "./sound"
 
 // How each piece moves and kills, played over time by the board:
 // - the sentinel curls into a spiked ball and rolls; to kill, it leaps onto the enemy, crushes it and bounces
@@ -21,6 +22,10 @@ export interface Motion {
   waitForCamera: boolean
   time: number
   track?: Track
+  /** Told when something audible happens (a step, a hit…) */
+  onCue?: (cue: Cue) => void
+  /** Cues already sent */
+  fired?: Set<string>
 }
 
 /** Ground height at a board position */
@@ -58,6 +63,14 @@ class Track {
   }
 }
 
+/** Sends a cue once the motion's time reaches `at`; `key` tells repeated cues apart */
+function cue(m: Motion, at: number, sound: Cue, key: string = sound.name) {
+  m.fired ??= new Set()
+  if (m.time < at || m.fired.has(key)) return
+  m.fired.add(key)
+  m.onCue?.(sound)
+}
+
 const flatDir = (a: THREE.Vector3, b: THREE.Vector3) => new THREE.Vector3(b.x - a.x, 0, b.z - a.z).normalize()
 
 function face(view: PieceView, dir: THREE.Vector3) {
@@ -88,6 +101,7 @@ export function playMotion(m: Motion, ground: Ground): boolean {
   m.track ??= new Track(walk, ground)
   const play = m.view.type === "sentinel" ? roll : m.view.type === "explorer" ? hop : march
   const end = play(m, walk, m.track, ground)
+  if (m.fadeOut) cue(m, end - FADE, { name: "exit" })
   if (m.fadeOut) setPieceOpacity(m.view, 1 - clamp01((m.time - (end - FADE)) / FADE))
   return m.time >= end
 }
@@ -141,6 +155,12 @@ function roll(m: Motion, walk: THREE.Vector3[], track: Track): number {
   const landed = m.attack ? rolled + LEAP : rolled
   const bounced = m.attack ? landed + BOUNCE : rolled
   const end = bounced + CURL
+  cue(m, 0, { name: "curl" })
+  if (track.total > 0) cue(m, CURL, { name: "roll", duration: track.total / ROLL_SPEED })
+  if (m.attack) {
+    cue(m, rolled, { name: "leap" })
+    cue(m, landed, { name: "crush" })
+  }
 
   // Curl up, stay a ball the whole way, uncurl once there
   const curl = ease(t < CURL ? t / CURL : t > bounced ? 1 - (t - bounced) / CURL : 1)
@@ -195,6 +215,10 @@ function hop(m: Motion, walk: THREE.Vector3[]): number {
     for (const leg of p.frontLegs!) leg.rotation.x = front
     for (const leg of p.backLegs!) leg.rotation.x = back
   }
+  for (let i = 0; i < walk.length - 1; i++) {
+    cue(m, i * HOP, { name: "hop" }, `hop${i}`)
+    cue(m, (i + 1) * HOP, { name: "land" }, `land${i}`)
+  }
   if (!m.attack) {
     if (t < hopsDone) jump(view, walk, t, legs)
     else {
@@ -213,6 +237,9 @@ function hop(m: Motion, walk: THREE.Vector3[]): number {
   const charged = hopsDone + WINDUP
   const dashed = charged + DASH
   const hit = charged + DASH * HIT
+  cue(m, hopsDone, { name: "bleat" })
+  cue(m, charged, { name: "charge" })
+  cue(m, hit, { name: "horns" })
   if (t < hopsDone) jump(view, walk, t, legs)
   else if (t < charged) {
     // Steps back, lowers its horns and paws the ground
@@ -282,6 +309,7 @@ function march(m: Motion, walk: THREE.Vector3[], track: Track, ground: Ground): 
     view.model.position.y = Math.abs(Math.sin(phase)) * 0.03
   }
   const walked = track.total / WALK_SPEED
+  for (let k = 1; k * STRIDE <= track.total + 1e-6; k++) cue(m, (k * STRIDE) / WALK_SPEED, { name: "step" }, `step${k}`)
   if (t < walked || !m.attack) {
     const distance = Math.min(t * WALK_SPEED, track.total)
     const { pos, dir } = track.at(distance)
@@ -298,6 +326,8 @@ function march(m: Motion, walk: THREE.Vector3[], track: Track, ground: Ground): 
   const hit = aimed + THRUST
   const held = hit + HOLD
   const end = held + STEP_IN
+  cue(m, aimed, { name: "thrust" })
+  if (m.victim) cue(m, hit + FALL * 0.5, { name: "fall" })
   face(view, dir)
   stride(0)
   const lunge = from.clone().addScaledVector(dir, LUNGE)

@@ -5,6 +5,7 @@ import { STANDALONE, type Host } from "./host"
 import type { Hud, HudButton } from "./hud"
 import type { OfficialKind, OfficialStatus } from "./official"
 import { account } from "./relay"
+import type { Sound } from "./sound"
 
 /** Everything the client knows, fed by the host; emits "change" */
 export class Session extends EventTarget {
@@ -100,6 +101,9 @@ abstract class AppChip extends ChipBase {
   }
   protected get session(): Session {
     return this.chipContext.session
+  }
+  protected get sound(): Sound {
+    return this.chipContext.sound
   }
 }
 
@@ -351,9 +355,11 @@ function actionFor(state: GameState, actions: LegalAction[], pick: Pick): LegalA
 class Selected extends AppChip {
   private pieceId = -1
   private actions: LegalAction[] = []
+  private hovered: number | null = null
 
   protected _onActivate() {
     this.pieceId = this._inputSignal!.params.pieceId
+    this.sound.ui("select")
     this.computeActions()
     this._subscribe(this.board, "pick", (e: CustomEvent<Pick>) => this.onPick(e.detail))
     this._subscribe(this.board, "hover", (e: CustomEvent<Pick>) => this.onHover(e.detail))
@@ -394,6 +400,8 @@ class Selected extends AppChip {
   private onHover(pick: Pick) {
     const la = actionFor(this.session.state!, this.actions, pick)
     const target = la ? (la.action.kind === "exit" ? la.action.from : la.action.to) : null
+    if (target !== null && target !== this.hovered) this.sound.ui("tick")
+    this.hovered = target
     this.board.showHover(target, la?.path)
     this.showInfo(la)
   }
@@ -423,7 +431,10 @@ class Sending extends AppChip {
       if (this.state === "active" && this.session.state && this.session.state.ply !== ply)
         this.terminate(new Signal(this.session.myTurn ? "idle" : "waiting"))
     })
-    this._subscribe(this.host, "error", () => this.terminate(new Signal("idle")))
+    this._subscribe(this.host, "error", () => {
+      this.sound.ui("error")
+      this.terminate(new Signal("idle"))
+    })
   }
 }
 

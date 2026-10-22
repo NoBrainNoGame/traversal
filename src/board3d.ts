@@ -2,9 +2,10 @@ import * as THREE from "three"
 import { cellAt, cellX, cellY, goalRow, inBoard, N, type GameState, type LegalAction, type Seat } from "../shared/rules"
 import { makePiece, type PieceView } from "./characters"
 import { playMotion, resetPose, type Motion } from "./motion"
+import { HAZE, Landscape } from "./landscape"
 import { BASE, boardHeight, boardWeights, heightColor, Scenery, STEP } from "./scenery"
+import { sceneUniforms } from "./shading"
 
-const FOG_COLOR = 0x1d232b
 /** Mesh resolution of the board ground, in vertices per square */
 const CELL_DIVISIONS = 16
 /** Squares painted over the ground: finer than the ground mesh so they hug its slopes, and pulled toward the camera in depth */
@@ -13,7 +14,7 @@ const DRAPE_LIFT = 0.035
 const OVERLAY = { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }
 /** A press is a click only if the pointer moved less than this between down and up (else it's a board drag) */
 const CLICK_TOLERANCE_PX = 6
-const TILT_RANGE = [-0.45, 0.4]
+const TILT_RANGE = [-0.55, 0.4]
 const ZOOM_RANGE = [9, 30]
 const DEFAULT_DISTANCE = 17.5
 const UP = new THREE.Vector3(0, 1, 0)
@@ -84,10 +85,11 @@ export class Board3D extends EventTarget {
   private state: GameState | null = null
   private lastMove = new THREE.Group()
   private lastMoveTextures = new Map<boolean, THREE.CanvasTexture>()
-  private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
+  private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000)
   private raycaster = new THREE.Raycaster()
   private terrain = new THREE.Group()
   private scenery = new Scenery()
+  private landscape = new Landscape()
   private highlights = new THREE.Group()
   private scope = new THREE.Group()
   /** Ground labels by look; their text is turned every frame to face the viewer */
@@ -121,11 +123,11 @@ export class Board3D extends EventTarget {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
-    this.scene.background = new THREE.Color(FOG_COLOR)
-    this.scene.fog = new THREE.Fog(FOG_COLOR, 20, 40)
+    // No fog: the land fades out toward its edge (see shading.ts), over the sky and the far landscape
+    this.scene.background = HAZE
 
-    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3020, 1.6))
-    const sun = new THREE.DirectionalLight(0xffffff, 2.2)
+    this.scene.add(new THREE.HemisphereLight(0xe6ecff, 0x3a3020, 1.6))
+    const sun = new THREE.DirectionalLight(0xfff1e0, 2.2)
     sun.position.set(-5, 12, 8)
     sun.castShadow = true
     sun.shadow.mapSize.set(2048, 2048)
@@ -135,7 +137,7 @@ export class Board3D extends EventTarget {
     this.pivot.add(this.pan)
     this.pan.add(this.world)
     this.scene.add(this.pivot)
-    this.world.add(this.terrain, this.scenery.group, this.scope, this.highlights)
+    this.world.add(this.landscape.group, this.terrain, this.scenery.group, this.scope, this.highlights)
     this.selection.renderOrder = 10
     this.selection.visible = false
     this.hoverMesh.visible = false
@@ -267,10 +269,6 @@ export class Board3D extends EventTarget {
     this.pan.position.copy(this.panFor(shown.center, shown.yaw))
     this.camera.position.set(0, shown.distance * 0.69, shown.distance * 0.72)
     this.camera.lookAt(0, 0.5, 0)
-    // The haze starts just past the board, whatever the zoom
-    const fog = this.scene.fog as THREE.Fog
-    fog.near = shown.distance - 2
-    fog.far = shown.distance + 14
   }
 
   /** The player moves the camera during a follow: keep the followed view as their own and stop following */
@@ -456,6 +454,7 @@ export class Board3D extends EventTarget {
           fadeOut: piece.status === "finished",
           waitForCamera,
           time: 0,
+          onCue: (cue) => this.dispatchEvent(new CustomEvent("cue", { detail: cue })),
         })
       } else if (piece.status === "board") {
         if (!this.anims.has(piece.id)) mesh.position.copy(this.cellTop(piece.cell))
@@ -679,8 +678,15 @@ export class Board3D extends EventTarget {
     }
 
     this.selection.material.opacity = 0.7 + Math.sin(now / 200) * 0.25
-    this.scenery.update(now / 1000)
+    sceneUniforms.uEdgeInverse.value.copy(this.world.matrixWorld).invert()
+    this.scenery.update(seconds, dt)
+    this.landscape.update(seconds)
     this.renderer.render(this.scene, this.camera)
+  }
+
+  /** Pieces are moving or the camera is following one */
+  get busy() {
+    return this.anims.size > 0 || !!this.follow
   }
 
   /** Closes in while the piece moves, lingers a moment, then eases back to the player's view */

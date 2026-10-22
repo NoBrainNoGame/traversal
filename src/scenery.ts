@@ -1,8 +1,12 @@
 import * as THREE from "three"
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js"
 import { cellAt, N, type Seat } from "../shared/rules"
+import { Nature } from "./nature"
+import { enchant, sceneUniforms } from "./shading"
+import { boardWater, LAKE_DROP, landWater, waterLevel } from "./water"
 
-// Procedural textures and the landscape around the board: outer terrain, side walls, goal light barriers
+// Procedural textures and the land around the board: outer terrain, side walls, goal light barriers, water,
+// plants and animals
 
 export const STEP = 0.35 // world height of one terrain unit
 export const BASE = 0.4
@@ -10,9 +14,9 @@ export const TEAM_COLORS = [0xd8443a, 0x3a7bd8]
 const HEIGHT_COLORS = [0x2f6f8f, 0x4f9a6a, 0x7fb45a, 0xb7b25b, 0xa47c4a, 0x8a6a55, 0x8f8f94, 0xc4c4cc, 0xf1f1f5].map(
   (c) => new THREE.Color(c),
 )
-const OUTER_SIZE = 90
+export const OUTER_SIZE = 90
 const BARRIER_HEIGHT = 3.4
-/** Brighter than the team colours so the light reads against the dark haze */
+/** Brighter than the team colours so the light reads against the land */
 const BARRIER_COLORS = [0xff5a3c, 0x4aa8ff]
 const BARRIER_REACH = 40
 
@@ -138,19 +142,19 @@ export function boardHeight(heights: number[], x: number, z: number) {
 }
 
 /** Height of the landscape at a world position: continues the board's edge, then rolls into hills */
-function outerHeight(heights: number[], x: number, z: number) {
+export function outerHeight(heights: number[], x: number, z: number) {
   const half = N / 2
   if (Math.abs(x) < half && Math.abs(z) < half) return -0.05 // hidden under the board
   const edge = boardHeight(heights, clamp(x, -half, half), clamp(z, -half, half)) - 0.03
   const d = Math.hypot(Math.max(Math.abs(x) - half, 0), Math.max(Math.abs(z) - half, 0))
-  // Gentle rolling ground near the board, bigger hills only far away in the haze
+  // Gentle rolling ground near the board, bigger hills only far away, where the land fades out
   const rolling = BASE + (fbm(x * 0.08, z * 0.08, 4, 3) - 0.35) * 2.2
   const hills = Math.pow(fbm(x * 0.04, z * 0.04, 3, 7), 2) * 9 * smoothstep(d, 10, 35)
   return lerp(edge, rolling, smoothstep(d, 0, 3.5)) + hills
 }
 
 /** Where a goal barrier runs: straight along the board, wandering once it leaves it */
-function barrierZ(seat: Seat, x: number) {
+export function barrierZ(seat: Seat, x: number) {
   const side = seat === 0 ? 1 : -1
   const away = smoothstep(Math.abs(x), N / 2, N / 2 + 4)
   const wander = Math.sin(x * 0.42 + seat * 2.1) * 1.1 + Math.sin(x * 0.15 + seat * 4) * 2.4 + Math.sin(x * 0.9) * 0.25
@@ -162,17 +166,18 @@ export class Scenery {
   private ground = makeGroundTexture()
   private barrier = makeBarrierTextures()
   private barrierMaterials: THREE.MeshBasicMaterial[]
+  private nature: Nature | null = null
 
   constructor() {
     this.barrierMaterials = BARRIER_COLORS.map((color) => {
-      return new THREE.MeshBasicMaterial({
+      return enchant(new THREE.MeshBasicMaterial({
         color,
         map: this.barrier.streaks,
         alphaMap: this.barrier.fade,
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
-      })
+      }))
     })
   }
 
@@ -187,6 +192,13 @@ export class Scenery {
     this.group.clear()
     this.group.add(this.buildOuterTerrain(heights), this.buildSideWalls(heights))
     for (const seat of [0, 1] as Seat[]) this.group.add(this.buildBarrier(heights, seat))
+    const level = waterLevel(BASE)
+    this.group.add(
+      boardWater(heights, level, (x, z) => boardHeight(heights, x, z)),
+      landWater(OUTER_SIZE, level - LAKE_DROP, (x, z) => outerHeight(heights, x, z)),
+    )
+    this.nature = new Nature(heights, level - LAKE_DROP)
+    this.group.add(this.nature.group)
   }
 
   private buildOuterTerrain(heights: number[]) {
@@ -200,16 +212,22 @@ export class Scenery {
         z = pos.getZ(i)
       const y = outerHeight(heights, x, z)
       pos.setY(i, y)
-      // Same palette as the board, a bit duller so the play area stands out
-      color.copy(heightColor((y - BASE) / STEP)).multiplyScalar(0.78 + fbm(x * 0.3, z * 0.3, 2, 17) * 0.12)
+      // Same palette as the board, a bit duller so the play area stands out; meadows rather than the board's
+      // blue lowlands (real water fills the hollows) or its snowy tops (the far hills)
+      const level = (y - BASE) / STEP
+      if (y < waterLevel(BASE) - LAKE_DROP) color.set(0x6f6650)
+      else color.copy(heightColor(clamp(level, 1, 4.5)))
+      color.multiplyScalar(0.78 + fbm(x * 0.3, z * 0.3, 2, 17) * 0.12)
       color.toArray(colors, i * 3)
     }
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3))
     geo.computeVertexNormals()
     const map = this.ground.clone()
     map.repeat.set(OUTER_SIZE / 1.5, OUTER_SIZE / 1.5)
-    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, map, bumpMap: map, roughness: 1 }))
+    const mesh = new THREE.Mesh(geo, enchant(new THREE.MeshStandardMaterial({ vertexColors: true, map, bumpMap: map, roughness: 1 })))
     mesh.receiveShadow = true
+    // The first transparent thing drawn: the water and everything else blend over it
+    mesh.renderOrder = -2
     return mesh
   }
 
@@ -258,7 +276,9 @@ export class Scenery {
     return mesh
   }
 
-  update(time: number) {
+  update(time: number, dt: number) {
+    sceneUniforms.uTime.value = time
+    this.nature?.update(time, dt)
     this.barrier.streaks.offset.set(time * 0.02, -time * 0.25)
     for (const [seat, material] of this.barrierMaterials.entries()) material.opacity = 0.85 + Math.sin(time * 1.7 + seat * 3) * 0.15
   }

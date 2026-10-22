@@ -11,6 +11,7 @@ import { LoginForm } from "./login"
 import { Net } from "./net"
 import { PauseMenu } from "./pause"
 import { account } from "./relay"
+import { Sound, type Cue, type UiSound } from "./sound"
 import { Webcam } from "./webcam"
 
 const boardCanvas = document.getElementById("board") as HTMLCanvasElement
@@ -28,6 +29,8 @@ addEventListener("resize", resize)
 resize()
 
 const session = new Session()
+const sound = new Sound()
+board.addEventListener("cue", (e) => sound.cue((e as CustomEvent<Cue>).detail))
 const loginForm = new LoginForm()
 // On GitHub Pages there's no local host: no local games, chat or webcams
 const net = STANDALONE ? null : new Net()
@@ -38,10 +41,11 @@ if (net) {
   net.addEventListener("chat", (e) => {
     const msg = (e as CustomEvent<Extract<ServerMessage, { t: "chat" }>>).detail
     chat.add(msg.messages, msg.reset)
+    if (!msg.reset) sound.ui("chat")
   })
   net.addEventListener("rtc", (e) => void webcam!.onSignal((e as CustomEvent<Extract<ServerMessage, { t: "rtc" }>>).detail.signal))
 }
-new PauseMenu(session, host, board, hud, webcam)
+new PauseMenu(session, host, board, hud, sound, webcam)
 const teamLabel = (seat: 0 | 1) => (seat === 0 ? "Rouge" : "Bleu")
 
 const showAccount = () => session.set({ account: account.loggedIn ? (account.username ?? "") : null })
@@ -75,6 +79,29 @@ on("state", (msg) => {
   session.set({ state: msg.state, connected: msg.connected, stateReceivedAt: Date.now() })
 })
 on("error", (msg) => hud.toast(msg.message))
+
+// Sounds that wait for the board to be still: the bugle when it's my turn (once the opponent's move has played out),
+// and the end of the game
+let pending: UiSound | null = null
+let wasMyTurn = false,
+  wasOver = true,
+  drawOffer: string | undefined
+session.addEventListener("change", () => {
+  const { state, seat } = session
+  const mine = session.myTurn
+  if (mine && !wasMyTurn) pending = "bugle"
+  if (!mine && pending === "bugle") pending = null
+  wasMyTurn = mine
+  if (state?.over && !wasOver) pending = seat === null || state.winner === seat ? "victory" : "defeat"
+  wasOver = !state || state.over
+  if (session.official?.drawOffer && session.official.drawOffer !== drawOffer) sound.ui("notify")
+  drawOffer = session.official?.drawOffer
+})
+const playPending = () => {
+  if (!pending || board.busy) return
+  sound.ui(pending)
+  pending = null
+}
 
 const clock = (ms: number) => {
   const total = Math.ceil(Math.max(ms, 0) / 1000)
@@ -111,8 +138,13 @@ host.connect()
 
 new Runner(
   new Parallel([
-    new Functional({ tick: () => board.render() }),
+    new Functional({
+      tick: () => {
+        board.render()
+        playPending()
+      },
+    }),
     makeAppMachine(),
   ]),
-  { rootContext: { host, board, hud, session } },
+  { rootContext: { host, board, hud, session, sound } },
 ).start()

@@ -54,8 +54,16 @@ Depuis [la version en ligne](https://nobrainnogame.github.io/traversal/) ou le l
 
 ## Le jeu
 
-- Relief continu : chaque case a un plateau plat, reliées par des pentes. Décor autour du plateau,
-  murets sur les côtés, barrières de lumière rouge / bleue sur les bords à atteindre, brume.
+- Relief continu : chaque case a un plateau plat, reliées par des pentes. Murets sur les côtés, barrières de
+  lumière rouge / bleue sur les bords à atteindre.
+- Paysage vivant autour du plateau : l'eau ruisselle sur les cases bleues et remplit les creux du terrain,
+  arbres, buissons, rochers, fleurs et herbes qui ondulent au vent, oiseaux en vol, papillons, lapins qui
+  sautillent, poissons qui bondissent hors des lacs, poussières de lumière.
+- Au loin, un monde fantastique : îles flottantes et leurs cascades, flèches de cristal, chaînes de montagnes,
+  nuages, planète à anneaux sur un ciel du matin. Le terrain devient progressivement transparent jusqu'à sa limite.
+- Sons synthétisés (aucun fichier) : roulade et écrasement de la Sentinelle, sauts, bêlement et charge de la
+  chèvre, pas et coup de lance de l'Avant-garde, sorties, sélection, fin de partie, et un clairon de réveil
+  quand c'est ton tour. Menu pause → « Couper le son ».
 - Personnages selon leur rôle : l'Explorateur est un éclaireur sur une chèvre avec un étendard, l'Avant-garde
   un soldat avec lance et bouclier, la Sentinelle une grosse brute. Badges de mouvement (vert) et de force
   (rouge) à leurs pieds.
@@ -72,7 +80,7 @@ Depuis [la version en ligne](https://nobrainnogame.github.io/traversal/) ou le l
 
 Reprendre · relancer la partie · échanger les camps · nouvelle partie locale sur un autre terrain · partie sur
 traversalgame.com (bot, matchmaking, invitation) ou retour au local · proposer la nulle / abandonner sur le site ·
-recentrer la vue · webcam et micro · déconnexion du compte traversalgame.com. En ligne, seules les options du site restent.
+recentrer la vue · couper le son · webcam et micro · déconnexion du compte traversalgame.com. En ligne, seules les options du site restent.
 
 ## Commandes
 
@@ -80,7 +88,8 @@ recentrer la vue · webcam et micro · déconnexion du compte traversalgame.com.
 - Clic gauche : sélectionner une pièce / jouer un coup (vert = déplacement, cyan = saut d'Explorateur, rouge = attaque, flèche dorée = sortie)
 - Clic gauche glissé : déplacer le plateau · Molette : zoom
 - Échap : désélectionner, sinon ouvrir / fermer le menu pause · Entrée : écrire dans le chat
-- Clic droit glissé : tourner et incliner le plateau (la caméra et la lumière restent fixes)
+- Clic droit glissé : tourner et incliner le plateau (la caméra et la lumière restent fixes) ; en l'inclinant
+  vers l'horizon, on voit le paysage lointain
 
 Un glissé n'est jamais pris pour un clic (tolérance de 6 px), et cliquer sur une autre de tes pièces change juste la sélection.
 
@@ -93,6 +102,8 @@ Un glissé n'est jamais pris pour un clic (tolérance de 6 px), et cliquer sur u
 - `relay/worker.ts` : le relais Cloudflare (`npm run relay:deploy`)
 - `src/flow.ts` : state machines booyah (connexion → lobby → partie → fin ; et tour : attente / sélection / envoi)
 - `src/board3d.ts` : rendu three.js et sélection · `src/scenery.ts` : relief, décor, barrières · `src/characters.ts` : personnages et badges
+- `src/water.ts` : eau animée · `src/nature.ts` : faune et flore · `src/landscape.ts` : ciel et paysage lointain · `src/shading.ts` : vent et fondu du terrain
+- `src/motion.ts` : animations des pions · `src/sound.ts` : effets sonores et clairon
 - `src/hud.ts` : interface pixi.js · `src/pause.ts` : menu pause
 - `src/chat.ts` : chat et emotes · `src/webcam.ts` : webcams en WebRTC
 
