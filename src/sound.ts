@@ -1,5 +1,5 @@
-// Sound effects, all synthesized with Web Audio (no audio files): piece motions, interface, and a morning bugle
-// call when it's the player's turn.
+// Sound effects, all synthesized with Web Audio (no audio files): piece motions, interface, a muffled bell when
+// it's the player's turn, and a bugle call at the end of the game.
 
 const MUTE_KEY = "traversal-muted"
 const MASTER = 0.55
@@ -9,7 +9,7 @@ export type Cue =
   | { name: "curl" | "leap" | "crush" | "hop" | "land" | "bleat" | "charge" | "horns" | "step" | "thrust" | "fall" | "exit" }
   | { name: "roll"; duration: number }
 
-export type UiSound = "select" | "tick" | "error" | "chat" | "notify" | "victory" | "defeat" | "bugle"
+export type UiSound = "select" | "tick" | "error" | "chat" | "notify" | "turn" | "victory" | "defeat"
 
 const NOTES: Record<string, number> = { G4: 392, C5: 523.25, E5: 659.25, G5: 783.99, C6: 1046.5, E6: 1318.5, G6: 1568, C7: 2093, A4: 440, Eb5: 622.25, D5: 587.33, Bb4: 466.16 }
 
@@ -19,6 +19,12 @@ const REVEILLE: [string, number][] = [
   ["G4", 0.13], ["C5", 0.13], ["E5", 0.13], ["C5", 0.13],
   ["G4", 0.13], ["C5", 0.13], ["E5", 0.13], ["C5", 0.13],
   ["E5", 0.26], ["G5", 0.62],
+]
+
+/** The opening of Taps, slow and solemn */
+const TAPS: [string, number][] = [
+  ["G4", 0.45], ["G4", 0.15], ["C5", 0.9],
+  ["G4", 0.45], ["C5", 0.15], ["E5", 1.1],
 ]
 
 function storedMuted() {
@@ -110,12 +116,12 @@ export class Sound extends EventTarget {
       case "notify":
         this.sweep(t, "triangle", 660, 660, 0.12, 0.2)
         return this.sweep(t + 0.14, "triangle", 880, 880, 0.18, 0.2)
+      case "turn":
+        return this.bell(t)
       case "victory":
-        return this.melody(t, [["C5", 0.14], ["E5", 0.14], ["G5", 0.14], ["C6", 0.5]])
-      case "defeat":
-        return this.melody(t, [["G4", 0.3], ["Eb5", 0.3], ["D5", 0.3], ["C5", 0.7]], 0.25)
-      case "bugle":
         return this.melody(t, REVEILLE)
+      case "defeat":
+        return this.melody(t, TAPS, 0.25)
     }
   }
 
@@ -300,6 +306,45 @@ export class Sound extends EventTarget {
       osc.start(t + i * spacing)
       osc.stop(t + i * spacing + 0.7)
     })
+  }
+
+  /** A small bell struck once, muffled: inharmonic partials ringing out under a low-pass filter */
+  private bell(t: number) {
+    const c = this.ctx!
+    const muffle = c.createBiquadFilter()
+    muffle.type = "lowpass"
+    muffle.frequency.value = 1400
+    muffle.Q.value = 0.5
+    const out = c.createGain()
+    out.gain.value = 0.6
+    muffle.connect(out)
+    out.connect(this.out!)
+    out.connect(this.wet!)
+    const base = 587.33
+    // Hum, fundamental, minor third, fifth, octave and up: the higher, the quieter and shorter
+    for (const [ratio, gain, decay] of [
+      [0.5, 0.25, 2.2],
+      [1, 0.5, 1.8],
+      [1.19, 0.2, 1.3],
+      [1.5, 0.15, 1.1],
+      [2, 0.18, 0.9],
+      [2.74, 0.08, 0.6],
+    ]) {
+      const osc = c.createOscillator()
+      osc.frequency.value = base * ratio
+      const env = c.createGain()
+      env.gain.setValueAtTime(0.0001, t)
+      env.gain.exponentialRampToValueAtTime(gain, t + 0.004)
+      env.gain.exponentialRampToValueAtTime(0.0001, t + decay)
+      osc.connect(env).connect(muffle)
+      osc.start(t)
+      osc.stop(t + decay + 0.05)
+    }
+    // The clapper's soft knock
+    const knock = c.createBiquadFilter()
+    knock.type = "bandpass"
+    knock.frequency.value = 900
+    this.noiseSource(t, 0.03).connect(knock).connect(this.envelope(t, 0.15, 0.001, 0.025))
   }
 
   /** Notes played on a bugle: two detuned saws through a filter that opens on each note's attack, a bit of breath */

@@ -61,9 +61,13 @@ Depuis [la version en ligne](https://nobrainnogame.github.io/traversal/) ou le l
   sautillent, poissons qui bondissent hors des lacs, poussières de lumière.
 - Au loin, un monde fantastique : îles flottantes et leurs cascades, flèches de cristal, chaînes de montagnes,
   nuages, planète à anneaux sur un ciel du matin. Le terrain devient progressivement transparent jusqu'à sa limite.
-- Sons synthétisés (aucun fichier) : roulade et écrasement de la Sentinelle, sauts, bêlement et charge de la
-  chèvre, pas et coup de lance de l'Avant-garde, sorties, sélection, fin de partie, et un clairon de réveil
-  quand c'est ton tour. Menu pause → « Couper le son ».
+- Sons synthétisés (aucun fichier audio) :
+  - une cloche étouffée quand c'est ton tour (après l'animation du coup adverse) ;
+  - le clairon en fin de partie : le réveil pour une victoire, la sonnerie aux morts sinon ;
+  - les pions : roulade et écrasement de la Sentinelle, sauts, bêlement et charge de la chèvre, pas et coup de
+    lance de l'Avant-garde, carillon quand un pion sort du plateau ;
+  - l'interface : sélection d'un pion, survol d'une case jouable, coup refusé, message de chat, proposition de nulle.
+  - Menu pause → « Couper le son » (mémorisé).
 - Personnages selon leur rôle : l'Explorateur est un éclaireur sur une chèvre avec un étendard, l'Avant-garde
   un soldat avec lance et bouclier, la Sentinelle une grosse brute. Badges de mouvement (vert) et de force
   (rouge) à leurs pieds.
@@ -73,8 +77,8 @@ Depuis [la version en ligne](https://nobrainnogame.github.io/traversal/) ou le l
   sur sa case. La chèvre de l'Explorateur saute de case en case, et pour tuer elle charge tête baissée et envoie
   l'ennemi voler. L'Avant-garde marche au pas, et pour tuer elle abaisse sa lance et se fend : l'ennemi tombe à la renverse.
 - Quand l'adversaire joue, la caméra se place de trois quarts (côté terrain le plus bas, plongée de 30°), zoome sur
-  le pion, attend d'être dessus pour le laisser bouger, le suit, puis revient en douceur à la vue que tu avais choisie. Son dernier coup reste marqué en orange
-  (case de départ remplie, cadre autour du pion).
+  le pion, attend d'être dessus pour le laisser bouger, le suit, puis revient en douceur à la vue que tu avais choisie.
+  Son dernier coup reste marqué en orange (case de départ remplie, cadre autour du pion).
 
 ## Menu pause (Échap)
 
@@ -103,7 +107,7 @@ Un glissé n'est jamais pris pour un clic (tolérance de 6 px), et cliquer sur u
 - `src/flow.ts` : state machines booyah (connexion → lobby → partie → fin ; et tour : attente / sélection / envoi)
 - `src/board3d.ts` : rendu three.js et sélection · `src/scenery.ts` : relief, décor, barrières · `src/characters.ts` : personnages et badges
 - `src/water.ts` : eau animée · `src/nature.ts` : faune et flore · `src/landscape.ts` : ciel et paysage lointain · `src/shading.ts` : vent et fondu du terrain
-- `src/motion.ts` : animations des pions · `src/sound.ts` : effets sonores et clairon
+- `src/motion.ts` : animations des pions · `src/sound.ts` : effets sonores, cloche et clairon
 - `src/hud.ts` : interface pixi.js · `src/pause.ts` : menu pause
 - `src/chat.ts` : chat et emotes · `src/webcam.ts` : webcams en WebRTC
 

@@ -80,8 +80,8 @@ on("state", (msg) => {
 })
 on("error", (msg) => hud.toast(msg.message))
 
-// Sounds that wait for the board to be still: the bugle when it's my turn (once the opponent's move has played out),
-// and the end of the game
+// Sounds that wait for the board to be still: the bell when it's my turn (once the opponent's move has played out),
+// and the bugle at the end of the game
 let pending: UiSound | null = null
 let wasMyTurn = false,
   wasOver = true,
@@ -89,8 +89,8 @@ let wasMyTurn = false,
 session.addEventListener("change", () => {
   const { state, seat } = session
   const mine = session.myTurn
-  if (mine && !wasMyTurn) pending = "bugle"
-  if (!mine && pending === "bugle") pending = null
+  if (mine && !wasMyTurn) pending = "turn"
+  if (!mine && pending === "turn") pending = null
   wasMyTurn = mine
   if (state?.over && !wasOver) pending = seat === null || state.winner === seat ? "victory" : "defeat"
   wasOver = !state || state.over
